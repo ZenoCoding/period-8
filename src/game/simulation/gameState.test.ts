@@ -1,0 +1,64 @@
+import { describe, expect, it } from 'vitest';
+import { createInitialGameState, resolvePortalTransition } from './gameState';
+import type { GameState } from './types';
+
+describe('hallway loop simulation', () => {
+  it('advances when a normal hallway is exited forward', () => {
+    const initial = createInitialGameState();
+
+    const result = resolvePortalTransition(initial, 'forward');
+
+    expect(result.wasCorrect).toBe(true);
+    expect(result.state.loopIndex).toBe(2);
+    expect(result.state.failCount).toBe(0);
+  });
+
+  it('advances when an anomalous hallway is exited backward', () => {
+    const anomalous: GameState = {
+      ...createInitialGameState(),
+      loopIndex: 2,
+      currentAnomalyId: 'locker-ajar',
+      expectedAction: 'backward'
+    };
+
+    const result = resolvePortalTransition(anomalous, 'backward');
+
+    expect(result.wasCorrect).toBe(true);
+    expect(result.state.loopIndex).toBe(3);
+    expect(result.state.lastOutcome).toBe('correct');
+  });
+
+  it('soft-resets and escalates ambience on a wrong direction', () => {
+    const anomalous: GameState = {
+      ...createInitialGameState(),
+      loopIndex: 4,
+      currentAnomalyId: 'clock-wrong',
+      expectedAction: 'backward',
+      ambienceLevel: 2
+    };
+
+    const result = resolvePortalTransition(anomalous, 'forward');
+
+    expect(result.wasCorrect).toBe(false);
+    expect(result.state.loopIndex).toBe(1);
+    expect(result.state.failCount).toBe(1);
+    expect(result.state.ambienceLevel).toBe(3);
+    expect(result.state.lastOutcome).toBe('wrong');
+  });
+
+  it('escapes after the target loop is completed correctly', () => {
+    const finalLoop: GameState = {
+      ...createInitialGameState(),
+      loopIndex: 8,
+      targetLoops: 8,
+      currentAnomalyId: null,
+      expectedAction: 'forward'
+    };
+
+    const result = resolvePortalTransition(finalLoop, 'forward');
+
+    expect(result.wasCorrect).toBe(true);
+    expect(result.state.phase).toBe('escaped');
+    expect(result.state.lastOutcome).toBe('escaped');
+  });
+});
