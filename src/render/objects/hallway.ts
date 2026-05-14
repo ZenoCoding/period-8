@@ -47,6 +47,7 @@ export interface EnvironmentMaterials {
 }
 
 export type TransitionSignSide = -1 | 1;
+export type TransitionSignOutcome = 'idle' | 'correct' | 'wrong';
 
 export interface TransitionSignHandle {
   root: THREE.Group;
@@ -58,22 +59,80 @@ export interface TransitionSignHandles {
   positive: TransitionSignHandle;
 }
 
+export const MAIN_HALF_WIDTH = 1.8;
+export const MAIN_HALF_LENGTH = 8 * 1.5;
+export const TRANSITION_BRANCH_X_MAX = 8;
+export const TRANSITION_ENTRY_Z_MIN = MAIN_HALF_LENGTH - MAIN_HALF_WIDTH;
+export const TRANSITION_ENTRY_Z_MAX = MAIN_HALF_LENGTH + MAIN_HALF_WIDTH;
+export const TRANSITION_CONNECTOR_CENTER_Z = MAIN_HALF_LENGTH + TRANSITION_BRANCH_X_MAX;
+export const TRANSITION_CONNECTOR_X_MAX = TRANSITION_BRANCH_X_MAX * 2;
+export const QUEUED_HALLWAY_ROOT_LOCAL_X = TRANSITION_CONNECTOR_X_MAX - MAIN_HALF_WIDTH;
+export const QUEUED_HALLWAY_ROOT_LOCAL_Z = TRANSITION_CONNECTOR_CENTER_Z + MAIN_HALF_LENGTH;
+
+export const MAIN_HALLWAY_RECTS: BoundsRect[] = [
+  { xMin: -MAIN_HALF_WIDTH, xMax: MAIN_HALF_WIDTH, zMin: -MAIN_HALF_LENGTH, zMax: MAIN_HALF_LENGTH }
+];
+
+const MAIN_POSITIVE_END_Z = MAIN_HALF_LENGTH;
+const MAIN_SIDE_OPENING_Z_MIN = TRANSITION_ENTRY_Z_MIN;
+const MAIN_SIDE_OPENING_Z_MAX = MAIN_HALF_LENGTH;
+const TRANSITION_CONNECTOR_Z_MIN = TRANSITION_CONNECTOR_CENTER_Z - MAIN_HALF_WIDTH;
+const TRANSITION_CONNECTOR_Z_MAX = TRANSITION_CONNECTOR_CENTER_Z + MAIN_HALF_WIDTH;
+const TRANSITION_CONNECTOR_MAIN_OVERLAP_X_MIN = TRANSITION_CONNECTOR_X_MAX - MAIN_HALF_WIDTH * 2;
+
 const CANONICAL_TRANSITION_RECTS: BoundsRect[] = [
-  { xMin: -1.5, xMax: 8, zMin: 6.5, zMax: 9.5 },
-  { xMin: 6.5, xMax: 9.5, zMin: 6.5, zMax: 16 },
-  { xMin: 6.5, xMax: 17.5, zMin: 14.5, zMax: 17.5 },
-  { xMin: 14.5, xMax: 17.5, zMin: 14.5, zMax: 25.6 }
+  {
+    xMin: -MAIN_HALF_WIDTH,
+    xMax: TRANSITION_BRANCH_X_MAX,
+    zMin: TRANSITION_ENTRY_Z_MIN,
+    zMax: TRANSITION_ENTRY_Z_MAX
+  },
+  {
+    xMin: TRANSITION_BRANCH_X_MAX - MAIN_HALF_WIDTH,
+    xMax: TRANSITION_BRANCH_X_MAX + MAIN_HALF_WIDTH,
+    zMin: TRANSITION_ENTRY_Z_MIN,
+    zMax: TRANSITION_CONNECTOR_CENTER_Z
+  },
+  {
+    xMin: TRANSITION_BRANCH_X_MAX - MAIN_HALF_WIDTH,
+    xMax: TRANSITION_CONNECTOR_X_MAX,
+    zMin: TRANSITION_CONNECTOR_Z_MIN,
+    zMax: TRANSITION_CONNECTOR_Z_MAX
+  }
+];
+
+const NEGATIVE_TRANSITION_RECTS = createTransitionRects(-1);
+const POSITIVE_TRANSITION_RECTS = createTransitionRects(1);
+
+export const QUEUED_HALLWAY_RECTS: BoundsRect[] = [
+  ...MAIN_HALLWAY_RECTS,
+  ...NEGATIVE_TRANSITION_RECTS
 ];
 
 export const WALKABLE_RECTS: BoundsRect[] = [
-  { xMin: -1.5, xMax: 1.5, zMin: -8, zMax: 8 },
-  ...createTransitionRects(-1),
-  ...createTransitionRects(1)
+  ...MAIN_HALLWAY_RECTS,
+  ...NEGATIVE_TRANSITION_RECTS,
+  ...POSITIVE_TRANSITION_RECTS
 ];
 
-const WALL_HEIGHT = 3;
+export type HallwaySceneLayout = 'full' | 'queuedNext';
+
+export interface HallwaySceneOptions {
+  layout?: HallwaySceneLayout;
+}
+
+const WALL_HEIGHT = 3.6;
+const WALL_CENTER_Y = WALL_HEIGHT / 2;
 const FLOOR_Y = -0.05;
 const CEILING_Y = WALL_HEIGHT + 0.05;
+const POSITIVE_WALL_FACE_X = MAIN_HALF_WIDTH - 0.015;
+const NEGATIVE_WALL_FACE_X = -MAIN_HALF_WIDTH + 0.015;
+
+interface ShellOptions {
+  walkableRects: BoundsRect[];
+  transitionFrameSides: TransitionSignSide[];
+  openMainPositiveSide: boolean;
+}
 
 function createTransitionRects(side: TransitionSignSide): BoundsRect[] {
   return CANONICAL_TRANSITION_RECTS.map((rect) => mirrorRectForSide(rect, side));
@@ -92,7 +151,10 @@ function mirrorRectForSide(rect: BoundsRect, side: TransitionSignSide): BoundsRe
   };
 }
 
-export function createHallwayScene(scene: THREE.Scene): HallwayHandles {
+export function createHallwayScene(scene: THREE.Scene, options: HallwaySceneOptions = {}): HallwayHandles {
+  const layout = options.layout ?? 'full';
+  const isQueuedNext = layout === 'queuedNext';
+  const walkableRects = isQueuedNext ? QUEUED_HALLWAY_RECTS : WALKABLE_RECTS;
   const root = new THREE.Group();
   root.name = 'hallway-root';
   scene.add(root);
@@ -118,22 +180,23 @@ export function createHallwayScene(scene: THREE.Scene): HallwayHandles {
     roughness: 0.6,
     metalness: 0.12
   });
-  const portalDark = new THREE.MeshStandardMaterial({
-    color: 0x17191c,
-    roughness: 1,
-    metalness: 0,
-    emissive: 0x020303
-  });
   const environmentMaterials = { wall, floor, ceiling, trim };
 
-  addHallwayShell(root, floor, wall, ceiling, trim, portalDark);
-  addTileGrid(root);
+  addHallwayShell(root, floor, wall, ceiling, trim, {
+    walkableRects,
+    transitionFrameSides: isQueuedNext ? [-1] : [-1, 1],
+    openMainPositiveSide: isQueuedNext
+  });
+  addTileGrid(root, walkableRects);
 
   const ambientLight = new THREE.HemisphereLight(0xf4f9ff, 0xd8dee5, 1.05);
-  scene.add(ambientLight);
+  if (!isQueuedNext) {
+    scene.add(ambientLight);
+  }
 
-  const lightHandles = addFluorescentLights(root);
+  const lightHandles = addFluorescentLights(root, 1);
   const propHandles = addProps(root, snapshots);
+  root.updateMatrixWorld(true);
 
   return {
     root,
@@ -148,16 +211,28 @@ export function createHallwayScene(scene: THREE.Scene): HallwayHandles {
 export function setTransitionSign(
   handles: HallwayHandles,
   side: TransitionSignSide,
-  correctCount: number,
+  level: number,
   targetLoops: number,
-  isEscaped: boolean
+  isEscaped: boolean,
+  outcome: TransitionSignOutcome = 'idle'
 ): void {
-  paintLevelSign(getTransitionSign(handles, side).texture, correctCount, targetLoops, isEscaped);
+  paintLevelSign(getTransitionSign(handles, side).texture, level, targetLoops, isEscaped, outcome);
 }
 
 export function setTransitionSignVisible(handles: HallwayHandles, visibleSide: TransitionSignSide | null): void {
   handles.transitionSigns.negative.root.visible = visibleSide === -1;
   handles.transitionSigns.positive.root.visible = visibleSide === 1;
+}
+
+export function setTransitionSignTransform(
+  handles: HallwayHandles,
+  side: TransitionSignSide,
+  position: THREE.Vector3,
+  rotationY: number
+): void {
+  const sign = getTransitionSign(handles, side).root;
+  sign.position.copy(position);
+  sign.rotation.y = rotationY;
 }
 
 function getTransitionSign(handles: HallwayHandles, side: TransitionSignSide): TransitionSignHandle {
@@ -192,9 +267,9 @@ function addHallwayShell(
   wallMaterial: THREE.Material,
   ceilingMaterial: THREE.Material,
   trimMaterial: THREE.Material,
-  portalMaterial: THREE.Material
+  options: ShellOptions
 ): void {
-  for (const rect of WALKABLE_RECTS) {
+  for (const rect of options.walkableRects) {
     const width = rect.xMax - rect.xMin;
     const depth = rect.zMax - rect.zMin;
     const x = (rect.xMin + rect.xMax) / 2;
@@ -204,13 +279,7 @@ function addHallwayShell(
     addBox(root, 'ceiling-panel', [width, 0.1, depth], [x, CEILING_Y, z], ceilingMaterial, false, false);
   }
 
-  addBoundaryWalls(root, wallMaterial, trimMaterial);
-
-  addBox(root, 'negative-transition-end', [2.9, 3.1, 0.16], [-16, 1.52, -25.72], portalMaterial, false, false);
-  addBox(root, 'positive-transition-end', [2.9, 3.1, 0.16], [16, 1.52, 25.72], portalMaterial, false, false);
-
-  addBox(root, 'negative-transition-frame-top', [3.4, 0.16, 0.24], [-16, 2.95, -25.45], trimMaterial);
-  addBox(root, 'positive-transition-frame-top', [3.4, 0.16, 0.24], [16, 2.95, 25.45], trimMaterial);
+  addBoundaryWalls(root, wallMaterial, trimMaterial, options);
 }
 
 const BASEBOARD_HEIGHT = 0.16;
@@ -231,20 +300,21 @@ interface VerticalBaseboardGap {
 }
 
 const VERTICAL_BASEBOARD_GAPS: VerticalBaseboardGap[] = [
-  { x: 1.5, side: 1, zStart: 4.25, zEnd: 5.65 },
-  { x: -1.5, side: -1, zStart: -3.0, zEnd: -1.6 }
+  { x: MAIN_HALF_WIDTH, side: 1, zStart: 4.25, zEnd: 5.65 },
+  { x: -MAIN_HALF_WIDTH, side: -1, zStart: -3.0, zEnd: -1.6 }
 ];
 
 function addBoundaryWalls(
   root: THREE.Group,
   wallMaterial: THREE.Material,
-  trimMaterial: THREE.Material
+  trimMaterial: THREE.Material,
+  options: ShellOptions
 ): void {
-  for (const rect of WALKABLE_RECTS) {
-    addVerticalBoundary(root, rect.xMin, rect.zMin, rect.zMax, -1, wallMaterial, trimMaterial);
-    addVerticalBoundary(root, rect.xMax, rect.zMin, rect.zMax, 1, wallMaterial, trimMaterial);
-    addHorizontalBoundary(root, rect.zMin, rect.xMin, rect.xMax, -1, wallMaterial, trimMaterial);
-    addHorizontalBoundary(root, rect.zMax, rect.xMin, rect.xMax, 1, wallMaterial, trimMaterial);
+  for (const rect of options.walkableRects) {
+    addVerticalBoundary(root, rect.xMin, rect.zMin, rect.zMax, -1, wallMaterial, trimMaterial, options);
+    addVerticalBoundary(root, rect.xMax, rect.zMin, rect.zMax, 1, wallMaterial, trimMaterial, options);
+    addHorizontalBoundary(root, rect.zMin, rect.xMin, rect.xMax, -1, wallMaterial, trimMaterial, options);
+    addHorizontalBoundary(root, rect.zMax, rect.xMin, rect.xMax, 1, wallMaterial, trimMaterial, options);
   }
 }
 
@@ -255,9 +325,13 @@ function addVerticalBoundary(
   zMax: number,
   side: -1 | 1,
   wallMaterial: THREE.Material,
-  trimMaterial: THREE.Material
+  trimMaterial: THREE.Material,
+  options: ShellOptions
 ): void {
-  for (const interval of getBoundaryIntervals('vertical', x, zMin, zMax, side)) {
+  const intervals = getBoundaryIntervals('vertical', x, zMin, zMax, side, options.walkableRects)
+    .flatMap((interval) => subtractVerticalOpeningGaps(x, side, interval, options));
+
+  for (const interval of intervals) {
     const length = interval.end - interval.start;
     if (length <= 0.04) {
       continue;
@@ -265,7 +339,7 @@ function addVerticalBoundary(
 
     const wallX = x + side * WALL_THICKNESS / 2;
     const wallZ = (interval.start + interval.end) / 2;
-    addBox(root, 'boundary-wall-z', [WALL_THICKNESS, WALL_HEIGHT, length], [wallX, 1.5, wallZ], wallMaterial);
+    addBox(root, 'boundary-wall-z', [WALL_THICKNESS, WALL_HEIGHT, length], [wallX, WALL_CENTER_Y, wallZ], wallMaterial);
 
     for (const baseboardInterval of subtractVerticalBaseboardGaps(x, side, interval)) {
       addBaseboardZ(
@@ -278,6 +352,31 @@ function addVerticalBoundary(
       );
     }
   }
+}
+
+function subtractVerticalOpeningGaps(
+  x: number,
+  side: -1 | 1,
+  interval: Interval,
+  options: ShellOptions | null
+): Interval[] {
+  if (options?.openMainPositiveSide && isMainPositiveSideOpening(x, side, interval)) {
+    return subtractInterval(interval, {
+      start: MAIN_SIDE_OPENING_Z_MIN,
+      end: MAIN_SIDE_OPENING_Z_MAX
+    });
+  }
+
+  return [interval];
+}
+
+function isMainPositiveSideOpening(x: number, side: -1 | 1, interval: Interval): boolean {
+  return (
+    side > 0 &&
+    Math.abs(x - MAIN_HALF_WIDTH) < 0.01 &&
+    interval.start < MAIN_SIDE_OPENING_Z_MAX &&
+    interval.end > MAIN_SIDE_OPENING_Z_MIN
+  );
 }
 
 function subtractVerticalBaseboardGaps(x: number, side: -1 | 1, interval: Interval): Interval[] {
@@ -323,9 +422,13 @@ function addHorizontalBoundary(
   xMax: number,
   side: -1 | 1,
   wallMaterial: THREE.Material,
-  trimMaterial: THREE.Material
+  trimMaterial: THREE.Material,
+  options: ShellOptions
 ): void {
-  for (const interval of getBoundaryIntervals('horizontal', z, xMin, xMax, side)) {
+  const intervals = getBoundaryIntervals('horizontal', z, xMin, xMax, side, options.walkableRects)
+    .flatMap((interval) => subtractHorizontalOpeningGaps(z, side, interval, options));
+
+  for (const interval of intervals) {
     const length = interval.end - interval.start;
     if (length <= 0.04) {
       continue;
@@ -333,9 +436,71 @@ function addHorizontalBoundary(
 
     const wallX = (interval.start + interval.end) / 2;
     const wallZ = z + side * WALL_THICKNESS / 2;
-    addBox(root, 'boundary-wall-x', [length, WALL_HEIGHT, WALL_THICKNESS], [wallX, 1.5, wallZ], wallMaterial);
+    addBox(root, 'boundary-wall-x', [length, WALL_HEIGHT, WALL_THICKNESS], [wallX, WALL_CENTER_Y, wallZ], wallMaterial);
     addBaseboardX(root, 'boundary-baseboard-x', interval.start, interval.end, z - side * BASEBOARD_THICKNESS / 2, trimMaterial);
   }
+}
+
+function subtractHorizontalOpeningGaps(
+  z: number,
+  side: -1 | 1,
+  interval: Interval,
+  options: ShellOptions
+): Interval[] {
+  let intervals = [interval];
+
+  if (options.openMainPositiveSide && isMainPositiveEndOpening(z, side, interval)) {
+    intervals = intervals.flatMap((candidate) =>
+      subtractInterval(candidate, { start: -MAIN_HALF_WIDTH, end: MAIN_HALF_WIDTH })
+    );
+  }
+
+  return intervals.flatMap((candidate) => subtractTransitionConnectorSideOpening(z, side, candidate));
+}
+
+function isMainPositiveEndOpening(z: number, side: -1 | 1, interval: Interval): boolean {
+  return (
+    side > 0 &&
+    Math.abs(z - MAIN_POSITIVE_END_Z) < 0.01 &&
+    interval.start < MAIN_HALF_WIDTH &&
+    interval.end > -MAIN_HALF_WIDTH
+  );
+}
+
+function subtractTransitionConnectorSideOpening(z: number, side: -1 | 1, interval: Interval): Interval[] {
+  if (isPositiveTransitionConnectorSide(z, side, interval)) {
+    return subtractInterval(interval, {
+      start: TRANSITION_CONNECTOR_MAIN_OVERLAP_X_MIN,
+      end: TRANSITION_CONNECTOR_X_MAX
+    });
+  }
+
+  if (isNegativeTransitionConnectorSide(z, side, interval)) {
+    return subtractInterval(interval, {
+      start: -TRANSITION_CONNECTOR_X_MAX,
+      end: -TRANSITION_CONNECTOR_MAIN_OVERLAP_X_MIN
+    });
+  }
+
+  return [interval];
+}
+
+function isPositiveTransitionConnectorSide(z: number, side: -1 | 1, interval: Interval): boolean {
+  return (
+    side > 0 &&
+    Math.abs(z - TRANSITION_CONNECTOR_Z_MAX) < 0.01 &&
+    interval.start < TRANSITION_CONNECTOR_X_MAX &&
+    interval.end > TRANSITION_CONNECTOR_MAIN_OVERLAP_X_MIN
+  );
+}
+
+function isNegativeTransitionConnectorSide(z: number, side: -1 | 1, interval: Interval): boolean {
+  return (
+    side < 0 &&
+    Math.abs(z + TRANSITION_CONNECTOR_Z_MAX) < 0.01 &&
+    interval.start < -TRANSITION_CONNECTOR_MAIN_OVERLAP_X_MIN &&
+    interval.end > -TRANSITION_CONNECTOR_X_MAX
+  );
 }
 
 function getBoundaryIntervals(
@@ -343,10 +508,11 @@ function getBoundaryIntervals(
   fixed: number,
   rangeMin: number,
   rangeMax: number,
-  side: -1 | 1
+  side: -1 | 1,
+  walkableRects: BoundsRect[]
 ): Interval[] {
   const breakpoints = [rangeMin, rangeMax];
-  for (const rect of WALKABLE_RECTS) {
+  for (const rect of walkableRects) {
     const otherMin = axis === 'vertical' ? rect.zMin : rect.xMin;
     const otherMax = axis === 'vertical' ? rect.zMax : rect.xMax;
     if (otherMax <= rangeMin || otherMin >= rangeMax) {
@@ -371,7 +537,7 @@ function getBoundaryIntervals(
     const sampleX = axis === 'vertical' ? fixed + side * 0.025 : midpoint;
     const sampleZ = axis === 'vertical' ? midpoint : fixed + side * 0.025;
 
-    if (!isInsideWalkableRect(sampleX, sampleZ)) {
+    if (!isInsideWalkableRect(sampleX, sampleZ, walkableRects)) {
       intervals.push({ start, end });
     }
   }
@@ -379,8 +545,8 @@ function getBoundaryIntervals(
   return intervals;
 }
 
-function isInsideWalkableRect(x: number, z: number): boolean {
-  return WALKABLE_RECTS.some(
+function isInsideWalkableRect(x: number, z: number, walkableRects: BoundsRect[]): boolean {
+  return walkableRects.some(
     (rect) => x > rect.xMin && x < rect.xMax && z > rect.zMin && z < rect.zMax
   );
 }
@@ -423,7 +589,7 @@ function addBaseboardZ(
   );
 }
 
-function addTileGrid(root: THREE.Group): void {
+function addTileGrid(root: THREE.Group, walkableRects: BoundsRect[]): void {
   const lineMaterial = new THREE.LineBasicMaterial({
     color: 0xa8afaa,
     transparent: true,
@@ -431,7 +597,7 @@ function addTileGrid(root: THREE.Group): void {
   });
   const positions: number[] = [];
 
-  for (const rect of WALKABLE_RECTS) {
+  for (const rect of walkableRects) {
     for (let x = Math.ceil(rect.xMin); x <= Math.floor(rect.xMax); x += 1) {
       positions.push(x, 0.012, rect.zMin, x, 0.012, rect.zMax);
     }
@@ -448,7 +614,8 @@ function addTileGrid(root: THREE.Group): void {
 }
 
 function addFluorescentLights(
-  root: THREE.Group
+  root: THREE.Group,
+  lightIntensityScale: number
 ): Pick<HallwayHandles, 'flickerLight' | 'flickerTubeMaterial'> {
   const tubeMaterial = new THREE.MeshStandardMaterial({
     color: 0xf6fbff,
@@ -466,12 +633,12 @@ function addFluorescentLights(
     { x: 0, z: -21.2, rotY: 0, intensity: 10.4 }
   ];
 
-  let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 11.6, 0.34, 1.78);
+  let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 11.6 * lightIntensityScale, 0.34, 1.78);
 
   for (const [index, spec] of lightSpecs.entries()) {
     const group = new THREE.Group();
     group.name = `fluorescent-${index + 1}`;
-    group.position.set(spec.x, 2.86, spec.z);
+    group.position.set(spec.x, WALL_HEIGHT - 0.14, spec.z);
     group.rotation.y = spec.rotY;
 
     const tube = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.035, 1.48), index === 2 ? dimTubeMaterial : tubeMaterial);
@@ -486,9 +653,14 @@ function addFluorescentLights(
     group.add(fixture);
 
     const isRotated = Math.abs(spec.rotY) > 0.01;
-    const light = new THREE.RectAreaLight(0xe2f2ff, spec.intensity, isRotated ? 1.78 : 0.34, isRotated ? 0.34 : 1.78);
+    const light = new THREE.RectAreaLight(
+      0xe2f2ff,
+      spec.intensity * lightIntensityScale,
+      isRotated ? 1.78 : 0.34,
+      isRotated ? 0.34 : 1.78
+    );
     light.name = `${group.name}-bar-light`;
-    light.position.set(spec.x, 2.74, spec.z);
+    light.position.set(spec.x, WALL_HEIGHT - 0.26, spec.z);
     light.rotation.x = -Math.PI / 2;
     root.add(light);
 
@@ -593,7 +765,7 @@ function addClassroomDoors(root: THREE.Group): void {
 
   addClassroomDoor(root, {
     name: 'classroom-door-101',
-    position: new THREE.Vector3(1.485, 0.04, 4.95),
+    position: new THREE.Vector3(POSITIVE_WALL_FACE_X, 0.04, 4.95),
     rotationY: -Math.PI / 2,
     label: '101',
     doorMaterial,
@@ -604,7 +776,7 @@ function addClassroomDoors(root: THREE.Group): void {
   });
   addClassroomDoor(root, {
     name: 'classroom-door-102',
-    position: new THREE.Vector3(-1.485, 0.04, -2.3),
+    position: new THREE.Vector3(NEGATIVE_WALL_FACE_X, 0.04, -2.3),
     rotationY: Math.PI / 2,
     label: '102',
     doorMaterial,
@@ -825,15 +997,16 @@ function createLevelSignTexture(): THREE.CanvasTexture {
   canvas.height = 512;
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  paintLevelSign(texture, 0, 8, false);
+  paintLevelSign(texture, 1, 8, false, 'idle');
   return texture;
 }
 
 function paintLevelSign(
   texture: THREE.CanvasTexture,
-  correctCount: number,
+  level: number,
   targetLoops: number,
-  isEscaped: boolean
+  isEscaped: boolean,
+  outcome: TransitionSignOutcome
 ): void {
   const canvas = texture.image as HTMLCanvasElement;
   const context = canvas.getContext('2d');
@@ -841,18 +1014,19 @@ function paintLevelSign(
     throw new Error('Could not create level sign canvas context.');
   }
 
-  const count = THREE.MathUtils.clamp(correctCount, 0, targetLoops);
+  const count = THREE.MathUtils.clamp(level, 1, targetLoops);
+  const status = getTransitionSignStatus(outcome, isEscaped);
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#f3f0df';
+  context.fillStyle = outcome === 'wrong' ? '#efe6df' : '#f3f0df';
   context.fillRect(0, 0, canvas.width, canvas.height);
-  context.strokeStyle = '#222927';
+  context.strokeStyle = outcome === 'wrong' ? '#351b17' : '#222927';
   context.lineWidth = 22;
   context.strokeRect(22, 22, canvas.width - 44, canvas.height - 44);
-  context.strokeStyle = '#b7ad8f';
+  context.strokeStyle = outcome === 'wrong' ? '#b86b5e' : '#b7ad8f';
   context.lineWidth = 4;
   context.strokeRect(48, 48, canvas.width - 96, canvas.height - 96);
 
-  context.fillStyle = '#171c1b';
+  context.fillStyle = outcome === 'wrong' ? '#3a1512' : '#171c1b';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.font = '700 58px Arial, sans-serif';
@@ -860,12 +1034,30 @@ function paintLevelSign(
   context.fillText('TURN BACK', canvas.width / 2, 172);
   context.font = '700 52px Arial, sans-serif';
   context.fillText('IF NOT, KEEP GOING', canvas.width / 2, 248);
-  context.font = '800 116px Arial, sans-serif';
-  context.fillText(isEscaped ? 'EXIT' : `EXIT ${count}`, canvas.width / 2, 372);
+  context.font = '800 94px Arial, sans-serif';
+  context.fillText(status, canvas.width / 2, 348);
+  context.font = '800 70px Arial, sans-serif';
+  context.fillText(isEscaped ? 'EXIT' : `LEVEL ${count}`, canvas.width / 2, 420);
   context.font = '700 34px Arial, sans-serif';
-  context.fillText(isEscaped ? 'THE REPETITION BREAKS' : `${count} / ${targetLoops}`, canvas.width / 2, 454);
+  context.fillText(isEscaped ? 'THE REPETITION BREAKS' : `${count} / ${targetLoops}`, canvas.width / 2, 466);
 
   texture.needsUpdate = true;
+}
+
+function getTransitionSignStatus(outcome: TransitionSignOutcome, isEscaped: boolean): string {
+  if (isEscaped) {
+    return 'SUCCESS';
+  }
+
+  if (outcome === 'wrong') {
+    return 'ERROR';
+  }
+
+  if (outcome === 'correct') {
+    return 'SUCCESS';
+  }
+
+  return 'READY';
 }
 
 function addMotivationalPoster(root: THREE.Group): void {
@@ -884,7 +1076,7 @@ function addMotivationalPoster(root: THREE.Group): void {
 
   const poster = new THREE.Group();
   poster.name = 'you-can-do-it-poster';
-  poster.position.set(-1.485, 1.48, 0.65);
+  poster.position.set(NEGATIVE_WALL_FACE_X, 1.48, 0.65);
   poster.rotation.y = Math.PI / 2;
   root.add(poster);
 
@@ -925,18 +1117,18 @@ function addLockers(
 
   for (let index = 0; index < 3; index += 1) {
     const z = 2.85 - index * 0.82;
-    addBox(lockerGroup, `locker-body-${index}`, [0.48, 1.62, 0.72], [1.22, 0.86, z], bodyMaterial);
+    addBox(lockerGroup, `locker-body-${index}`, [0.48, 1.62, 0.72], [MAIN_HALF_WIDTH - 0.28, 0.86, z], bodyMaterial);
     const interior = addBox(
       lockerGroup,
       `locker-interior-${index}`,
       [0.04, 1.44, 0.58],
-      [0.96, 0.92, z],
+      [MAIN_HALF_WIDTH - 0.54, 0.92, z],
       lockerInteriorMaterial,
       false,
       false
     );
-    const door = addBox(lockerGroup, `locker-door-${index}`, [0.045, 1.45, 0.61], [0.93, 0.93, z], doorMaterial);
-    addBox(lockerGroup, `locker-handle-${index}`, [0.04, 0.18, 0.035], [0.89, 1.05, z - 0.21], handleMaterial);
+    const door = addBox(lockerGroup, `locker-door-${index}`, [0.045, 1.45, 0.61], [MAIN_HALF_WIDTH - 0.57, 0.93, z], doorMaterial);
+    addBox(lockerGroup, `locker-handle-${index}`, [0.04, 0.18, 0.035], [MAIN_HALF_WIDTH - 0.61, 1.05, z - 0.21], handleMaterial);
 
     if (index === 1) {
       anomalyDoor = door;
@@ -958,7 +1150,7 @@ function addClock(
 ): Pick<HallwayHandles, 'clockHourPivot' | 'clockMinutePivot' | 'clockSecondPivot' | 'clockSecondMaterial'> {
   const clockGroup = new THREE.Group();
   clockGroup.name = 'wall-clock';
-  clockGroup.position.set(-1.46, 2.32, 3.7);
+  clockGroup.position.set(-MAIN_HALF_WIDTH + 0.04, WALL_HEIGHT - 0.68, 3.7);
   clockGroup.scale.setScalar(0.78);
   root.add(clockGroup);
 
@@ -1049,7 +1241,7 @@ function addSecurityCamera(
 
   const cameraRoot = new THREE.Group();
   cameraRoot.name = 'security-camera';
-  cameraRoot.position.set(1.24, 2.46, -3.75);
+  cameraRoot.position.set(MAIN_HALF_WIDTH - 0.26, WALL_HEIGHT - 0.54, -3.75);
   root.add(cameraRoot);
 
   addBox(cameraRoot, 'camera-mount', [0.22, 0.28, 0.22], [0.18, 0.16, 0], mountMaterial);
@@ -1090,7 +1282,7 @@ function addVent(
 
   const ventGroup = new THREE.Group();
   ventGroup.name = 'ceiling-vent';
-  ventGroup.position.set(-8, 2.94, -15.05);
+  ventGroup.position.set(-8, WALL_HEIGHT - 0.06, -15.05);
   root.add(ventGroup);
 
   const ventDarkness = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.025, 0.72), darknessMaterial);
@@ -1137,7 +1329,7 @@ function addExitGlow(root: THREE.Group): THREE.Mesh {
     })
   );
   glow.name = 'exit-glow';
-  glow.position.set(-16, 1.55, -25.53);
+  glow.position.set(-TRANSITION_CONNECTOR_X_MAX, WALL_CENTER_Y, -TRANSITION_CONNECTOR_CENTER_Z);
   glow.visible = false;
   root.add(glow);
   return glow;

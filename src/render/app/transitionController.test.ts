@@ -31,7 +31,7 @@ describe('transition controller', () => {
     expect(commit.result.wasCorrect).toBe(true);
     expect(commit.state.loopIndex).toBe(2);
     expect(commit.state.streak).toBe(1);
-    expect(commit.signCount).toBe(1);
+    expect(commit.signCount).toBe(2);
     expect(postCommit.phase).toBe('postCommit');
   });
 
@@ -49,10 +49,10 @@ describe('transition controller', () => {
     expect(commit.result.wasCorrect).toBe(true);
     expect(commit.state.loopIndex).toBe(3);
     expect(commit.state.streak).toBe(1);
-    expect(commit.signCount).toBe(1);
+    expect(commit.signCount).toBe(3);
   });
 
-  it('resets wrong choices and reports the next confirmed sign as zero', () => {
+  it('resets wrong choices and reports the reset level on the sign', () => {
     const anomalous: GameState = {
       ...createInitialGameState(),
       loopIndex: 4,
@@ -68,7 +68,7 @@ describe('transition controller', () => {
     expect(commit.activeTransition.phase).toBe('resetting');
     expect(commit.state.loopIndex).toBe(1);
     expect(commit.state.streak).toBe(0);
-    expect(commit.signCount).toBe(0);
+    expect(commit.signCount).toBe(1);
   });
 
   it('does not derive sign state before commit', () => {

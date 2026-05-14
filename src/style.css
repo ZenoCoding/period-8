@@ -102,7 +102,7 @@ button {
 .hud__debug {
   right: 18px;
   top: 18px;
-  width: 270px;
+  width: min(410px, calc(100vw - 36px));
   padding: 12px 14px;
   border: 1px solid rgba(169, 216, 178, 0.24);
   background: rgba(6, 10, 9, 0.74);

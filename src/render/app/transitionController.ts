@@ -44,7 +44,7 @@ export function commitTransition(state: GameState, activeTransition: ActiveTrans
     activeTransition: committedTransition,
     state: result.state,
     result,
-    signCount: result.wasCorrect ? result.state.streak : 0,
+    signCount: result.state.loopIndex,
     shouldReset: !result.wasCorrect
   };
 }

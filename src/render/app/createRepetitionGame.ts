@@ -4,7 +4,23 @@ import { createInitialGameState } from '../../game/simulation/gameState';
 import type { GameState } from '../../game/simulation/types';
 import { createHud, renderHud } from '../../ui/hud';
 import { applyAnomaly, updateAnomaly, updateAtmosphere } from '../adapters/anomalyRenderer';
-import { createHallwayScene, setTransitionSign, setTransitionSignVisible, WALKABLE_RECTS } from '../objects/hallway';
+import {
+  createHallwayScene,
+  MAIN_HALF_LENGTH,
+  MAIN_HALF_WIDTH,
+  QUEUED_HALLWAY_RECTS,
+  QUEUED_HALLWAY_ROOT_LOCAL_X,
+  QUEUED_HALLWAY_ROOT_LOCAL_Z,
+  setTransitionSign,
+  setTransitionSignTransform,
+  setTransitionSignVisible,
+  TRANSITION_BRANCH_X_MAX,
+  TRANSITION_ENTRY_Z_MAX,
+  TRANSITION_ENTRY_Z_MIN,
+  WALKABLE_RECTS,
+  type BoundsRect,
+  type HallwayHandles
+} from '../objects/hallway';
 import {
   beginTransition,
   commitTransition,
@@ -13,6 +29,16 @@ import {
   type TransitionPhase,
   type TransitionSide
 } from './transitionController';
+import {
+  captureCommitGate,
+  captureSignPlacement,
+  formatTransitionTuning,
+  getNearestTransitionSide,
+  isPastTunedCommitGate,
+  loadTransitionTuning,
+  resetTransitionTuning,
+  sideKey
+} from './transitionTuning';
 
 export interface RepetitionGame {
   destroy(): void;
@@ -20,14 +46,29 @@ export interface RepetitionGame {
 
 const PLAYER_HEIGHT = 1.62;
 const PLAYER_RADIUS = 0.28;
-const NEGATIVE_HALLWAY_START = new THREE.Vector3(0, PLAYER_HEIGHT, 7.15);
-const NEGATIVE_EXIT_Z = -7.72;
-const POSITIVE_EXIT_X = 1.82;
-const NEGATIVE_COMMIT_X = -11.1;
-const POSITIVE_COMMIT_X = 11.1;
-const NEGATIVE_POST_SIGN_HANDOFF_Z = -22.05;
-const POSITIVE_POST_SIGN_HANDOFF_Z = 22.05;
+const NEGATIVE_HALLWAY_START = new THREE.Vector3(
+  0,
+  PLAYER_HEIGHT,
+  MAIN_HALF_LENGTH - 0.85
+);
+const NEGATIVE_EXIT_Z = -MAIN_HALF_LENGTH + PLAYER_RADIUS;
+const POSITIVE_EXIT_X = MAIN_HALF_WIDTH + PLAYER_RADIUS + 0.04;
+const POSITIVE_EXIT_Z_MIN = TRANSITION_ENTRY_Z_MIN + 0.15;
+const POSITIVE_EXIT_Z_MAX = TRANSITION_ENTRY_Z_MAX - 0.15;
+const QUEUED_HALLWAY_ROOT_X = QUEUED_HALLWAY_ROOT_LOCAL_X;
+const QUEUED_HALLWAY_ROOT_Z = QUEUED_HALLWAY_ROOT_LOCAL_Z;
+const NEXT_HALLWAY_HANDOFF_LOCAL_Z = MAIN_HALF_LENGTH + 0.15;
+const MAIN_CORRIDOR_CENTER_LIMIT = MAIN_HALF_WIDTH - PLAYER_RADIUS + 0.02;
+const MAIN_INTERIOR_Z_MIN = -MAIN_HALF_LENGTH + 0.55;
+const MAIN_INTERIOR_Z_MAX = MAIN_HALF_LENGTH - 0.55;
+const COMMITTED_VIEW_LIMIT = 1.22;
 const UP = new THREE.Vector3(0, 1, 0);
+
+interface HallwayCell {
+  handles: HallwayHandles;
+  state: GameState;
+  walkableRects: BoundsRect[];
+}
 
 export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   root.replaceChildren();
@@ -41,12 +82,15 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   const camera = new THREE.PerspectiveCamera(74, 1, 0.035, 70);
   camera.rotation.order = 'YXZ';
 
-  const hallway = createHallwayScene(scene);
   const hud = createHud(root);
   const input = createInputState();
   const audio = createHorrorAudio();
 
   let state = createInitialGameState();
+  let hallway = createHallwayScene(scene);
+  let currentHallwayState = state;
+  let nextHallway: HallwayCell | null = null;
+  let transitionTuning = loadTransitionTuning();
   let animationFrame = 0;
   let isRenderLoopRunning = false;
   let isPaused = false;
@@ -54,6 +98,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let transitionCooldown = 0;
   let transitionPhase: TransitionPhase = 'observing';
   let activeTransition: ActiveTransition | null = null;
+  let suppressedExitSide: TransitionSide | null = null;
+  let debugNotice = '';
   let yaw = 0;
   let pitch = 0;
   let activeElapsedSeconds = 0;
@@ -62,8 +108,9 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   const moveForward = new THREE.Vector3();
   const moveRight = new THREE.Vector3();
 
+  applyTransitionTuningToHallway(hallway);
   applyAnomaly(hallway, state.currentAnomalyId);
-  resetTransitionSignsToCount(0);
+  resetTransitionSigns(state.loopIndex, 'idle');
   renderHud(hud, state);
 
   const resize = (): void => {
@@ -133,7 +180,10 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (applyKeyChange(input, event.code, true)) {
+    const handledInput = applyKeyChange(input, event.code, true);
+    const handledTuning = handleDebugTuningKey(event.code);
+
+    if (handledInput || handledTuning) {
       event.preventDefault();
     }
   };
@@ -160,6 +210,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   const update = (deltaSeconds: number, elapsedSeconds: number): void => {
     transitionCooldown = Math.max(0, transitionCooldown - deltaSeconds);
+    constrainCommittedView();
     camera.rotation.set(pitch, yaw, 0);
 
     if (isPointerLocked) {
@@ -170,9 +221,18 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     }
 
     camera.position.copy(playerPosition);
-    updateAnomaly(hallway, state, playerPosition, elapsedSeconds);
+    updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds);
+    if (nextHallway) {
+      updateAnomaly(nextHallway.handles, nextHallway.state, playerPosition, elapsedSeconds);
+    }
     updateAtmosphere(scene, hallway, state);
+    if (nextHallway) {
+      updateAtmosphere(scene, nextHallway.handles, state);
+    }
     hud.setDebugVisible(input.debug);
+    if (input.debug) {
+      updateDebugOverlay();
+    }
     audio.update(state, elapsedSeconds);
   };
 
@@ -244,7 +304,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     const speed = input.sprint ? 4.15 : 2.45;
     const candidate = playerPosition.clone().addScaledVector(movement, speed * deltaSeconds);
     candidate.y = PLAYER_HEIGHT;
-    playerPosition.copy(resolveMovement(playerPosition, candidate));
+    playerPosition.copy(resolveMovement(playerPosition, candidate, isWalkableWorld));
   }
 
   function evaluateTransitions(): void {
@@ -261,6 +321,14 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   function trackTransitionEntry(): void {
     if (activeTransition) {
       return;
+    }
+
+    if (suppressedExitSide) {
+      if (isInsideCurrentHallway()) {
+        suppressedExitSide = null;
+      } else {
+        return;
+      }
     }
 
     const side = getCurrentExitSide();
@@ -287,18 +355,14 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     activeTransition = commit.activeTransition;
     transitionPhase = activeTransition.phase;
 
-    if (commit.shouldReset) {
-      resetAfterWrongChoice();
-      return;
-    }
-
-    applyAnomaly(hallway, state.currentAnomalyId);
+    queueNextHallway(activeTransition.side, state);
     setTransitionSign(
       hallway,
       activeTransition.side,
       commit.signCount,
       state.targetLoops,
-      state.phase === 'escaped'
+      state.phase === 'escaped',
+      commit.result.wasCorrect ? 'correct' : 'wrong'
     );
     setTransitionSignVisible(hallway, activeTransition.side);
     renderHud(hud, state);
@@ -321,27 +385,30 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     if (
       !activeTransition ||
       activeTransition.phase !== 'postCommit' ||
-      !isPastPostSignHandoff(activeTransition.side)
+      !nextHallway ||
+      !isReadyForQueuedHallwayHandoff(nextHallway)
     ) {
       return;
     }
 
-    playerPosition.copy(NEGATIVE_HALLWAY_START);
-    yaw = 0;
+    recenterToQueuedHallway(nextHallway);
+    suppressedExitSide = activeTransition.side;
     activeTransition = null;
     transitionPhase = 'observing';
     setTransitionSignVisible(hallway, null);
   }
 
   function getCurrentExitSide(): TransitionSide | null {
-    if (playerPosition.z <= NEGATIVE_EXIT_Z) {
+    const local = worldToHallwayLocal(hallway, playerPosition);
+
+    if (local.z <= NEGATIVE_EXIT_Z) {
       return -1;
     }
 
     if (
-      playerPosition.x >= POSITIVE_EXIT_X &&
-      playerPosition.z >= 6.65 &&
-      playerPosition.z <= 9.35
+      local.x >= POSITIVE_EXIT_X &&
+      local.z >= POSITIVE_EXIT_Z_MIN &&
+      local.z <= POSITIVE_EXIT_Z_MAX
     ) {
       return 1;
     }
@@ -350,41 +417,224 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function isPastCommitGate(side: TransitionSide): boolean {
-    if (side < 0) {
-      return playerPosition.x <= NEGATIVE_COMMIT_X && playerPosition.z <= -14.35;
-    }
-
-    return playerPosition.x >= POSITIVE_COMMIT_X && playerPosition.z >= 14.35;
+    const local = worldToHallwayLocal(hallway, playerPosition);
+    return isPastTunedCommitGate(transitionTuning, side, local.x, local.z);
   }
 
-  function isPastPostSignHandoff(side: TransitionSide): boolean {
-    return side < 0
-      ? playerPosition.z <= NEGATIVE_POST_SIGN_HANDOFF_Z
-      : playerPosition.z >= POSITIVE_POST_SIGN_HANDOFF_Z;
-  }
-
-  function resetAfterWrongChoice(): void {
-    transitionPhase = 'resetting';
-    activeTransition = null;
-    playerPosition.copy(NEGATIVE_HALLWAY_START);
-    yaw = 0;
-    pitch = 0;
-    transitionCooldown = 0.64;
-    applyAnomaly(hallway, state.currentAnomalyId);
-    resetTransitionSignsToCount(0);
-    renderHud(hud, state);
-    hud.flashPortal();
-    transitionPhase = 'observing';
-  }
-
-  function resetTransitionSignsToCount(count: number): void {
-    setTransitionSign(hallway, -1, count, state.targetLoops, state.phase === 'escaped');
-    setTransitionSign(hallway, 1, count, state.targetLoops, state.phase === 'escaped');
+  function resetTransitionSigns(level: number, outcome: 'idle' | 'correct' | 'wrong'): void {
+    setTransitionSign(hallway, -1, level, state.targetLoops, state.phase === 'escaped', outcome);
+    setTransitionSign(hallway, 1, level, state.targetLoops, state.phase === 'escaped', outcome);
     setTransitionSignVisible(hallway, null);
   }
 
   function isInsideCurrentHallway(): boolean {
-    return Math.abs(playerPosition.x) <= 1.24 && playerPosition.z > -7.45 && playerPosition.z < 7.45;
+    const local = worldToHallwayLocal(hallway, playerPosition);
+    return (
+      Math.abs(local.x) <= MAIN_CORRIDOR_CENTER_LIMIT &&
+      local.z > MAIN_INTERIOR_Z_MIN &&
+      local.z < MAIN_INTERIOR_Z_MAX
+    );
+  }
+
+  function queueNextHallway(side: TransitionSide, nextState: GameState): void {
+    if (nextHallway) {
+      disposeHallway(nextHallway.handles);
+      nextHallway = null;
+    }
+
+    const handles = createHallwayScene(scene, { layout: 'queuedNext' });
+    const rotationY = side > 0 ? Math.PI : 0;
+
+    handles.root.rotation.y = rotationY;
+    handles.root.position.set(side * QUEUED_HALLWAY_ROOT_X, 0, side * QUEUED_HALLWAY_ROOT_Z);
+    handles.root.updateMatrixWorld(true);
+
+    applyTransitionTuningToHallway(handles);
+    applyAnomaly(handles, nextState.currentAnomalyId);
+    updateAtmosphere(scene, handles, nextState);
+    paintTransitionSigns(handles, nextState.loopIndex, nextState.targetLoops, nextState.phase === 'escaped', 'idle');
+    setTransitionSignVisible(handles, null);
+    nextHallway = { handles, state: nextState, walkableRects: QUEUED_HALLWAY_RECTS };
+  }
+
+  function isReadyForQueuedHallwayHandoff(cell: HallwayCell): boolean {
+    const local = worldToHallwayLocal(cell.handles, playerPosition);
+    const isInQueuedMain = (
+      Math.abs(local.x) <= MAIN_CORRIDOR_CENTER_LIMIT &&
+      local.z > MAIN_INTERIOR_Z_MIN &&
+      local.z < NEXT_HALLWAY_HANDOFF_LOCAL_Z
+    );
+    const isInQueuedEntranceBranch = (
+      local.x > MAIN_CORRIDOR_CENTER_LIMIT &&
+      local.x <= TRANSITION_BRANCH_X_MAX - PLAYER_RADIUS &&
+      local.z > TRANSITION_ENTRY_Z_MIN + PLAYER_RADIUS &&
+      local.z < NEXT_HALLWAY_HANDOFF_LOCAL_Z
+    );
+
+    return isInQueuedMain || isInQueuedEntranceBranch;
+  }
+
+  function recenterToQueuedHallway(cell: HallwayCell): void {
+    const previousHallway = hallway;
+    const previousPreview = cell.handles;
+    const nextLocalPosition = worldToHallwayLocal(cell.handles, playerPosition);
+    const nextRootYaw = cell.handles.root.rotation.y;
+
+    yaw = normalizeAngle(yaw - nextRootYaw);
+    hallway = createHallwayScene(scene);
+    currentHallwayState = cell.state;
+    nextHallway = null;
+    applyTransitionTuningToHallway(hallway);
+    applyAnomaly(hallway, state.currentAnomalyId);
+    hallway.root.position.set(0, 0, 0);
+    hallway.root.rotation.set(0, 0, 0);
+    hallway.root.updateMatrixWorld(true);
+    playerPosition.copy(
+      hallway.root.localToWorld(new THREE.Vector3(nextLocalPosition.x, PLAYER_HEIGHT, nextLocalPosition.z))
+    );
+    disposeHallway(previousHallway);
+    disposeHallway(previousPreview);
+    resetTransitionSigns(state.loopIndex, 'idle');
+    renderHud(hud, state);
+  }
+
+  function handleDebugTuningKey(code: string): boolean {
+    if (!input.debug) {
+      return false;
+    }
+
+    const { side, local } = getTuningCaptureContext();
+    if (code === 'KeyC') {
+      transitionTuning = captureCommitGate(transitionTuning, side, local.x, local.z);
+      debugNotice = `Captured ${formatSide(side)} commit at x ${formatNumber(local.x)} z ${formatNumber(local.z)}`;
+      return true;
+    }
+
+    if (code === 'KeyV') {
+      const capture = captureSignPlacement(transitionTuning, side, local.x, local.y, local.z);
+      transitionTuning = capture.tuning;
+      applyTransitionTuningToHallway(hallway);
+      if (nextHallway) {
+        applyTransitionTuningToHallway(nextHallway.handles);
+      }
+      debugNotice = `Captured ${formatSide(side)} sign on ${capture.wall}`;
+      return true;
+    }
+
+    if (code === 'KeyR') {
+      transitionTuning = resetTransitionTuning();
+      applyTransitionTuningToHallway(hallway);
+      if (nextHallway) {
+        applyTransitionTuningToHallway(nextHallway.handles);
+      }
+      debugNotice = 'Reset transition tuning to defaults';
+      return true;
+    }
+
+    return false;
+  }
+
+  function getTuningCaptureContext(): { side: TransitionSide; local: THREE.Vector3 } {
+    const local = worldToHallwayLocal(hallway, playerPosition);
+    return {
+      side: activeTransition?.side ?? getNearestTransitionSide(local.x, local.z),
+      local
+    };
+  }
+
+  function updateDebugOverlay(): void {
+    const local = worldToHallwayLocal(hallway, playerPosition);
+    const side = activeTransition?.side ?? getNearestTransitionSide(local.x, local.z);
+    const queuedLocal = nextHallway ? worldToHallwayLocal(nextHallway.handles, playerPosition) : null;
+    hud.debug.textContent = [
+      `Position: x ${formatNumber(local.x)} z ${formatNumber(local.z)} yaw ${formatNumber(yaw)}`,
+      queuedLocal ? `Queued local: x ${formatNumber(queuedLocal.x)} z ${formatNumber(queuedLocal.z)}` : 'Queued local: none',
+      `Transition: ${transitionPhase} side ${formatSide(side)}`,
+      `Level: ${state.loopIndex}/${state.targetLoops} outcome ${state.lastOutcome}`,
+      formatTransitionTuning(transitionTuning),
+      'Debug tuning: C commit, V sign, R reset',
+      debugNotice ? `Last: ${debugNotice}` : ''
+    ].filter(Boolean).join('\n');
+  }
+
+  function applyTransitionTuningToHallway(handles: HallwayHandles): void {
+    for (const side of [-1, 1] as const) {
+      const tuning = transitionTuning[sideKey(side)];
+      setTransitionSignTransform(
+        handles,
+        side,
+        new THREE.Vector3(tuning.signX, tuning.signY, tuning.signZ),
+        tuning.signRotationY
+      );
+    }
+  }
+
+  function paintTransitionSigns(
+    handles: HallwayHandles,
+    level: number,
+    targetLoops: number,
+    isEscaped: boolean,
+    outcome: 'idle' | 'correct' | 'wrong'
+  ): void {
+    setTransitionSign(handles, -1, level, targetLoops, isEscaped, outcome);
+    setTransitionSign(handles, 1, level, targetLoops, isEscaped, outcome);
+  }
+
+  function isWalkableWorld(x: number, z: number): boolean {
+    if (isWalkableInHallway(hallway, x, z, true)) {
+      return true;
+    }
+
+    return nextHallway
+      ? isWalkableInHallway(nextHallway.handles, x, z, false, nextHallway.walkableRects)
+      : false;
+  }
+
+  function isWalkableInHallway(
+    handles: HallwayHandles,
+    x: number,
+    z: number,
+    shouldApplyCommitLock: boolean,
+    walkableRects = WALKABLE_RECTS
+  ): boolean {
+    const local = worldToHallwayLocal(handles, new THREE.Vector3(x, PLAYER_HEIGHT, z));
+    if (!isWalkableLocal(local.x, local.z, walkableRects)) {
+      return false;
+    }
+
+    return !shouldApplyCommitLock || !isBlockedByCommitLock(local.x, local.z);
+  }
+
+  function isBlockedByCommitLock(x: number, z: number): boolean {
+    if (!activeTransition || activeTransition.phase === 'preCommit') {
+      return false;
+    }
+
+    return !isPastTunedCommitGate(transitionTuning, activeTransition.side, x, z);
+  }
+
+  function constrainCommittedView(): void {
+    if (!activeTransition || activeTransition.phase === 'preCommit') {
+      return;
+    }
+
+    const centerYaw = activeTransition.side < 0 ? 0 : Math.PI;
+    yaw = clampAngleAround(yaw, centerYaw, COMMITTED_VIEW_LIMIT);
+  }
+
+  function worldToHallwayLocal(handles: HallwayHandles, worldPosition: THREE.Vector3): THREE.Vector3 {
+    return handles.root.worldToLocal(worldPosition.clone());
+  }
+
+  function disposeHallway(handles: HallwayHandles): void {
+    scene.remove(handles.root);
+    scene.remove(handles.ambientLight);
+    handles.root.traverse((object) => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
+        object.geometry.dispose();
+        disposeMaterial(object.material);
+      }
+    });
   }
 
   return {
@@ -401,6 +651,10 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       window.removeEventListener('blur', syncPauseState);
       window.removeEventListener('focus', syncPauseState);
       window.removeEventListener('pageshow', syncPauseState);
+      if (nextHallway) {
+        disposeHallway(nextHallway.handles);
+      }
+      disposeHallway(hallway);
       audio.destroy();
       renderer.dispose();
       root.replaceChildren();
@@ -429,7 +683,11 @@ function createScene(): THREE.Scene {
   return scene;
 }
 
-function resolveMovement(current: THREE.Vector3, candidate: THREE.Vector3): THREE.Vector3 {
+function resolveMovement(
+  current: THREE.Vector3,
+  candidate: THREE.Vector3,
+  isWalkable: (x: number, z: number) => boolean
+): THREE.Vector3 {
   if (isWalkable(candidate.x, candidate.z)) {
     return candidate;
   }
@@ -447,14 +705,44 @@ function resolveMovement(current: THREE.Vector3, candidate: THREE.Vector3): THRE
   return current;
 }
 
-function isWalkable(x: number, z: number): boolean {
-  return WALKABLE_RECTS.some(
+function isWalkableLocal(
+  x: number,
+  z: number,
+  walkableRects: BoundsRect[]
+): boolean {
+  return walkableRects.some(
     (rect) =>
       x >= rect.xMin + PLAYER_RADIUS &&
       x <= rect.xMax - PLAYER_RADIUS &&
       z >= rect.zMin + PLAYER_RADIUS &&
       z <= rect.zMax - PLAYER_RADIUS
   );
+}
+
+function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
+  if (Array.isArray(material)) {
+    material.forEach(disposeMaterial);
+    return;
+  }
+
+  material.dispose();
+}
+
+function clampAngleAround(angle: number, center: number, limit: number): number {
+  const delta = normalizeAngle(angle - center);
+  return normalizeAngle(center + THREE.MathUtils.clamp(delta, -limit, limit));
+}
+
+function normalizeAngle(angle: number): number {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
+function formatSide(side: TransitionSide): string {
+  return side < 0 ? 'forward/-' : 'back/+';
+}
+
+function formatNumber(value: number): string {
+  return value.toFixed(2);
 }
 
 interface HorrorAudio {
