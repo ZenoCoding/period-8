@@ -42,9 +42,10 @@ button {
   inset: 0;
   pointer-events: none;
   color: #e8efe7;
+  --screen-fuzz: 0.36;
+  --screen-jitter: 0.12;
 }
 
-.hud::before,
 .hud::after {
   position: absolute;
   inset: 0;
@@ -52,19 +53,12 @@ button {
   pointer-events: none;
 }
 
-.hud::before {
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.025) 50%, transparent 50%) 0 0 / 100% 4px,
-    radial-gradient(circle, transparent 56%, rgba(0, 0, 0, 0.52) 100%);
-  mix-blend-mode: screen;
-  opacity: 0.32;
-}
-
 .hud::after {
   top: 50%;
   left: 50%;
   right: auto;
   bottom: auto;
+  z-index: 4;
   width: 8px;
   height: 8px;
   border: 1px solid rgba(232, 239, 231, 0.76);
@@ -77,9 +71,10 @@ button {
 }
 
 .hud__message,
-.hud__debug {
+.hud__debug,
+.hud__fps {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   text-transform: uppercase;
   letter-spacing: 0;
   text-shadow: 0 1px 10px rgba(0, 0, 0, 0.72);
@@ -123,11 +118,29 @@ button {
   transform: translateY(0);
 }
 
+.hud__fps {
+  left: 16px;
+  top: 14px;
+  min-width: 118px;
+  padding: 7px 9px;
+  border: 1px solid rgba(169, 216, 178, 0.22);
+  background: rgba(6, 10, 9, 0.62);
+  color: rgba(216, 238, 224, 0.9);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.hud__fps--low {
+  border-color: rgba(255, 160, 126, 0.5);
+  color: #ffd8c8;
+}
+
 .hud__prompt {
   position: absolute;
   left: 50%;
   top: 50%;
-  z-index: 3;
+  z-index: 4;
   min-width: 178px;
   min-height: 44px;
   border: 1px solid rgba(227, 239, 229, 0.36);
@@ -156,10 +169,51 @@ button {
   pointer-events: none;
 }
 
+.hud__screen-effects {
+  position: absolute;
+  inset: -2%;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  transform:
+    translate3d(calc((var(--screen-jitter) - 0.1) * 0.35px), calc((0.16 - var(--screen-jitter)) * 0.35px), 0)
+    scale(1.005);
+}
+
+.hud__screen-effects::before,
+.hud__screen-effects::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+}
+
+.hud__screen-effects::before {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.034) 50%, transparent 50%) 0 0 / 100% 4px,
+    linear-gradient(90deg, rgba(255, 45, 45, 0.035), transparent 11%, transparent 87%, rgba(80, 170, 255, 0.04)),
+    radial-gradient(circle at 50% 50%, transparent 48%, rgba(0, 0, 0, 0.58) 100%);
+  mix-blend-mode: screen;
+  opacity: calc(0.28 + var(--screen-fuzz) * 0.36);
+  animation: screen-scan 5.8s linear infinite;
+}
+
+.hud__screen-effects::after {
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='table' tableValues='0 0.78'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: 92px 92px;
+  mix-blend-mode: screen;
+  opacity: calc(0.045 + var(--screen-fuzz) * 0.12);
+  transform: translate3d(0, 0, 0);
+  animation:
+    screen-noise-shift 280ms steps(2, end) infinite,
+    screen-flicker 3.7s steps(1, end) infinite;
+}
+
 .hud__fade {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
   background: #020303;
   opacity: 0;
   pointer-events: none;
@@ -180,6 +234,46 @@ button {
 
   100% {
     opacity: 0;
+  }
+}
+
+@keyframes screen-scan {
+  0% {
+    background-position: 0 0, 0 0, 0 0;
+  }
+
+  100% {
+    background-position: 0 24px, 0 0, 0 0;
+  }
+}
+
+@keyframes screen-noise-shift {
+  0% {
+    transform: translate3d(-1.5%, -1%, 0);
+  }
+
+  50% {
+    transform: translate3d(1%, 1.25%, 0);
+  }
+
+  100% {
+    transform: translate3d(-0.75%, 0.5%, 0);
+  }
+}
+
+@keyframes screen-flicker {
+  0%,
+  84%,
+  100% {
+    filter: brightness(1);
+  }
+
+  85% {
+    filter: brightness(1.35);
+  }
+
+  86% {
+    filter: brightness(0.82);
   }
 }
 

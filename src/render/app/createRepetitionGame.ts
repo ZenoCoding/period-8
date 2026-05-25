@@ -21,6 +21,7 @@ import {
   type BoundsRect,
   type HallwayHandles
 } from '../objects/hallway';
+import { createHallwayWalker, type HallwayWalkerSnapshot } from '../objects/hallwayWalker';
 import {
   beginTransition,
   commitTransition,
@@ -44,8 +45,23 @@ export interface RepetitionGame {
   destroy(): void;
 }
 
+declare global {
+  interface Window {
+    advanceTime?: (ms: number) => void;
+    render_game_to_text?: () => string;
+  }
+}
+
 const PLAYER_HEIGHT = 1.62;
 const PLAYER_RADIUS = 0.28;
+const TARGET_FPS = 30;
+const TARGET_FRAME_SECONDS = 1 / TARGET_FPS;
+const MAX_FRAME_DELTA_SECONDS = TARGET_FRAME_SECONDS * 3;
+const MAX_RENDER_PIXEL_RATIO = 1.35;
+const CAMERA_BASE_FOV = 74;
+const BASE_SCREEN_FUZZ = 0.34;
+const BASE_LENS_WARP = 0.012;
+const AMBIENCE_SMOOTHING_SECONDS = 1.4;
 const NEGATIVE_HALLWAY_START = new THREE.Vector3(
   0,
   PLAYER_HEIGHT,
@@ -62,12 +78,59 @@ const MAIN_CORRIDOR_CENTER_LIMIT = MAIN_HALF_WIDTH - PLAYER_RADIUS + 0.02;
 const MAIN_INTERIOR_Z_MIN = -MAIN_HALF_LENGTH + 0.55;
 const MAIN_INTERIOR_Z_MAX = MAIN_HALF_LENGTH - 0.55;
 const COMMITTED_VIEW_LIMIT = 1.22;
+const FOOTSTEP_SAMPLE_PATH = '/audio/footsteps/freesound-community-footsteps-in-a-hallway-47842.mp3?v=raw-segments-2';
+const RECORDED_FOOTSTEP_SLICE_DURATION = 0.52;
+const RECORDED_FOOTSTEP_SEGMENT_OFFSETS = [
+  0.62,
+  1.19,
+  1.79,
+  2.38,
+  3.03,
+  3.53,
+  4.24,
+  4.69,
+  5.35,
+  5.81,
+  6.46,
+  6.97,
+  7.53,
+  8.1,
+  8.68,
+  9.24,
+  9.8,
+  10.32
+] as const;
 const UP = new THREE.Vector3(0, 1, 0);
 
 interface HallwayCell {
   handles: HallwayHandles;
   state: GameState;
   walkableRects: BoundsRect[];
+}
+
+interface FramePerformance {
+  record(renderCostMs: number, frameDeltaSeconds: number): void;
+  snapshot(): {
+    targetFps: number;
+    averageFps: number;
+    averageRenderMs: number;
+    lastRenderMs: number;
+    lastFrameMs: number;
+  };
+}
+
+interface ScreenEffectState {
+  time: number;
+  warp: number;
+  aberration: number;
+  fuzz: number;
+}
+
+interface ScreenEffectPass {
+  setSize(): void;
+  setState(state: ScreenEffectState): void;
+  render(scene: THREE.Scene, camera: THREE.Camera): void;
+  dispose(): void;
 }
 
 export function createRepetitionGame(root: HTMLElement): RepetitionGame {
@@ -79,8 +142,9 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   const renderer = createRenderer(canvas);
   const scene = createScene();
-  const camera = new THREE.PerspectiveCamera(74, 1, 0.035, 70);
+  const camera = new THREE.PerspectiveCamera(CAMERA_BASE_FOV, 1, 0.035, 70);
   camera.rotation.order = 'YXZ';
+  const screenEffects = createScreenEffectPass(renderer);
 
   const hud = createHud(root);
   const input = createInputState();
@@ -88,13 +152,23 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   let state = createInitialGameState();
   let hallway = createHallwayScene(scene);
+  const hallwayWalker = createHallwayWalker();
   let currentHallwayState = state;
   let nextHallway: HallwayCell | null = null;
+  let standbyHallway: HallwayCell | null = null;
+  let queuedPreviewHallway: HallwayCell | null = null;
+  let pendingStandbyState: GameState | null = null;
+  let isStandbyPreparationScheduled = false;
   let transitionTuning = loadTransitionTuning();
   let animationFrame = 0;
+  let frameAccumulator = 0;
+  let measuredFrameAccumulator = 0;
+  let fpsHudAccumulator = 0;
   let isRenderLoopRunning = false;
   let isPaused = false;
+  let isDestroyed = false;
   let isPointerLocked = false;
+  let isAdvancingAutomation = false;
   let transitionCooldown = 0;
   let transitionPhase: TransitionPhase = 'observing';
   let activeTransition: ActiveTransition | null = null;
@@ -102,24 +176,43 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let debugNotice = '';
   let yaw = 0;
   let pitch = 0;
+  let transitionVisualPulse = 0;
+  let anomalyVisualPulse = 0;
+  let lastVisualAnomalyId: GameState['currentAnomalyId'] = state.currentAnomalyId;
   let activeElapsedSeconds = 0;
+  let smoothedAmbienceLevel = state.ambienceLevel;
+  let playerMoveSpeed = 0;
   const clock = new THREE.Clock();
   const playerPosition = NEGATIVE_HALLWAY_START.clone();
   const moveForward = new THREE.Vector3();
   const moveRight = new THREE.Vector3();
+  const movement = new THREE.Vector3();
+  const candidatePosition = new THREE.Vector3();
+  const xOnlyPosition = new THREE.Vector3();
+  const zOnlyPosition = new THREE.Vector3();
+  const hallwayLocalScratch = new THREE.Vector3();
+  const perf = createFramePerformanceTracker();
+  const previousAdvanceTime = window.advanceTime;
+  const previousRenderGameToText = window.render_game_to_text;
+  let installedAdvanceTime: Window['advanceTime'] = undefined;
+  let installedRenderGameToText: Window['render_game_to_text'] = undefined;
+  let automationFrameAccumulator = 0;
 
   applyTransitionTuningToHallway(hallway);
   applyAnomaly(hallway, state.currentAnomalyId);
   resetTransitionSigns(state.loopIndex, 'idle');
   renderHud(hud, state);
+  scheduleHallwayPoolWarmup();
+  installAutomationHooks();
 
   const resize = (): void => {
     const width = Math.max(1, root.clientWidth);
     const height = Math.max(1, root.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_RENDER_PIXEL_RATIO));
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    screenEffects.setSize();
   };
 
   const requestLock = (): void => {
@@ -213,27 +306,40 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     constrainCommittedView();
     camera.rotation.set(pitch, yaw, 0);
 
-    if (isPointerLocked) {
-      updatePlayerPosition(deltaSeconds);
+    if (isPointerLocked || isAdvancingAutomation) {
+      playerMoveSpeed = updatePlayerPosition(deltaSeconds);
       if (state.phase === 'playing' || transitionPhase !== 'observing') {
         evaluateTransitions();
       }
+    } else {
+      playerMoveSpeed = 0;
     }
 
-    camera.position.copy(playerPosition);
     updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds);
     if (nextHallway) {
       updateAnomaly(nextHallway.handles, nextHallway.state, playerPosition, elapsedSeconds);
     }
-    updateAtmosphere(scene, hallway, state);
+    const visibleAmbienceLevel = updateSmoothedAmbience(deltaSeconds);
+    updateAtmosphere(scene, hallway, state, visibleAmbienceLevel);
     if (nextHallway) {
-      updateAtmosphere(scene, nextHallway.handles, state);
+      updateAtmosphere(scene, nextHallway.handles, state, visibleAmbienceLevel);
     }
+    hallwayWalker.update(deltaSeconds);
     hud.setDebugVisible(input.debug);
     if (input.debug) {
       updateDebugOverlay();
     }
-    audio.update(state, elapsedSeconds);
+    updateScreenTreatment(deltaSeconds, elapsedSeconds);
+    audio.update(
+      state,
+      visibleAmbienceLevel,
+      elapsedSeconds,
+      playerMoveSpeed,
+      input.sprint,
+      hallwayWalker.snapshot(),
+      playerPosition,
+      yaw
+    );
   };
 
   const tick = (): void => {
@@ -243,10 +349,25 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       return;
     }
 
-    const deltaSeconds = Math.min(clock.getDelta(), 0.05);
+    const rawFrameDeltaSeconds = clock.getDelta();
+    const frameDeltaSeconds = Math.min(rawFrameDeltaSeconds, MAX_FRAME_DELTA_SECONDS);
+    frameAccumulator += frameDeltaSeconds;
+    measuredFrameAccumulator += rawFrameDeltaSeconds;
+
+    if (frameAccumulator < TARGET_FRAME_SECONDS) {
+      animationFrame = requestAnimationFrame(tick);
+      return;
+    }
+
+    const deltaSeconds = Math.min(frameAccumulator, MAX_FRAME_DELTA_SECONDS);
+    frameAccumulator = 0;
     activeElapsedSeconds += deltaSeconds;
+    const frameStart = performance.now();
     update(deltaSeconds, activeElapsedSeconds);
-    renderer.render(scene, camera);
+    renderFrame();
+    perf.record(performance.now() - frameStart, measuredFrameAccumulator);
+    updateFpsCounter(deltaSeconds);
+    measuredFrameAccumulator = 0;
     animationFrame = requestAnimationFrame(tick);
   };
 
@@ -258,6 +379,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     }
 
     clock.getDelta();
+    frameAccumulator = 0;
+    measuredFrameAccumulator = 0;
     isRenderLoopRunning = true;
     animationFrame = requestAnimationFrame(tick);
   }
@@ -279,12 +402,12 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     input.sprint = false;
   }
 
-  function updatePlayerPosition(deltaSeconds: number): void {
+  function updatePlayerPosition(deltaSeconds: number): number {
     const axisX = Number(input.right) - Number(input.left);
     const axisZ = Number(input.forward) - Number(input.backward);
 
     if (axisX === 0 && axisZ === 0) {
-      return;
+      return 0;
     }
 
     camera.getWorldDirection(moveForward);
@@ -292,19 +415,22 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     moveForward.normalize();
     moveRight.crossVectors(moveForward, UP).normalize();
 
-    const movement = new THREE.Vector3()
+    movement.set(0, 0, 0)
       .addScaledVector(moveForward, axisZ)
       .addScaledVector(moveRight, axisX);
 
     if (movement.lengthSq() <= 0) {
-      return;
+      return 0;
     }
 
     movement.normalize();
     const speed = input.sprint ? 4.15 : 2.45;
-    const candidate = playerPosition.clone().addScaledVector(movement, speed * deltaSeconds);
-    candidate.y = PLAYER_HEIGHT;
-    playerPosition.copy(resolveMovement(playerPosition, candidate, isWalkableWorld));
+    candidatePosition.copy(playerPosition).addScaledVector(movement, speed * deltaSeconds);
+    candidatePosition.y = PLAYER_HEIGHT;
+    const nextPosition = resolveMovement(playerPosition, candidatePosition, isWalkableWorld, xOnlyPosition, zOnlyPosition);
+    const distance = playerPosition.distanceTo(nextPosition);
+    playerPosition.copy(nextPosition);
+    return distance / Math.max(deltaSeconds, 0.001);
   }
 
   function evaluateTransitions(): void {
@@ -339,6 +465,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     activeTransition = beginTransition(side);
     transitionPhase = activeTransition.phase;
     setTransitionSignVisible(hallway, null);
+    pulseScreenDistortion(0.72);
   }
 
   function evaluateTransitionCommitGate(): void {
@@ -366,6 +493,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     );
     setTransitionSignVisible(hallway, activeTransition.side);
     renderHud(hud, state);
+    pulseScreenDistortion(commit.result.wasCorrect ? 0.82 : 1);
 
     activeTransition = markTransitionPostCommit(activeTransition);
     transitionPhase = activeTransition.phase;
@@ -438,23 +566,22 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   function queueNextHallway(side: TransitionSide, nextState: GameState): void {
     if (nextHallway) {
-      disposeHallway(nextHallway.handles);
+      hideHallwayCell(nextHallway);
       nextHallway = null;
     }
 
-    const handles = createHallwayScene(scene, { layout: 'queuedNext' });
+    const queuedCell = getQueuedPreviewHallway();
+    const handles = queuedCell.handles;
     const rotationY = side > 0 ? Math.PI : 0;
 
+    handles.root.visible = true;
     handles.root.rotation.y = rotationY;
     handles.root.position.set(side * QUEUED_HALLWAY_ROOT_X, 0, side * QUEUED_HALLWAY_ROOT_Z);
     handles.root.updateMatrixWorld(true);
 
-    applyTransitionTuningToHallway(handles);
-    applyAnomaly(handles, nextState.currentAnomalyId);
-    updateAtmosphere(scene, handles, nextState);
-    paintTransitionSigns(handles, nextState.loopIndex, nextState.targetLoops, nextState.phase === 'escaped', 'idle');
-    setTransitionSignVisible(handles, null);
-    nextHallway = { handles, state: nextState, walkableRects: QUEUED_HALLWAY_RECTS };
+    configureHallwayForState(queuedCell, nextState);
+    nextHallway = queuedCell;
+    scheduleStandbyPreparation(nextState);
   }
 
   function isReadyForQueuedHallwayHandoff(cell: HallwayCell): boolean {
@@ -475,27 +602,40 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function recenterToQueuedHallway(cell: HallwayCell): void {
-    const previousHallway = hallway;
-    const previousPreview = cell.handles;
+    const previousHallway: HallwayCell = {
+      handles: hallway,
+      state: currentHallwayState,
+      walkableRects: WALKABLE_RECTS
+    };
+    const promotedHallway = getStandbyHallway();
+    if (promotedHallway.state !== cell.state) {
+      prepareStandbyHallway(cell.state);
+    }
+    pendingStandbyState = null;
     const nextLocalPosition = worldToHallwayLocal(cell.handles, playerPosition);
     const nextRootYaw = cell.handles.root.rotation.y;
 
     yaw = normalizeAngle(yaw - nextRootYaw);
-    hallway = createHallwayScene(scene);
-    currentHallwayState = cell.state;
+
+    activateHallwayCell(promotedHallway);
+    hallway = promotedHallway.handles;
+    currentHallwayState = promotedHallway.state;
+    standbyHallway = previousHallway;
+    hideHallwayCell(standbyHallway);
+    hideHallwayCell(cell);
     nextHallway = null;
-    applyTransitionTuningToHallway(hallway);
-    applyAnomaly(hallway, state.currentAnomalyId);
+
     hallway.root.position.set(0, 0, 0);
     hallway.root.rotation.set(0, 0, 0);
     hallway.root.updateMatrixWorld(true);
     playerPosition.copy(
       hallway.root.localToWorld(new THREE.Vector3(nextLocalPosition.x, PLAYER_HEIGHT, nextLocalPosition.z))
     );
-    disposeHallway(previousHallway);
-    disposeHallway(previousPreview);
     resetTransitionSigns(state.loopIndex, 'idle');
     renderHud(hud, state);
+    hallwayWalker.start(hallway.root);
+    renderer.shadowMap.needsUpdate = true;
+    pulseScreenDistortion(1.08);
   }
 
   function handleDebugTuningKey(code: string): boolean {
@@ -557,6 +697,101 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     ].filter(Boolean).join('\n');
   }
 
+  function updateFpsCounter(deltaSeconds: number): void {
+    const snapshot = perf.snapshot();
+    const hasFrameSpike = snapshot.lastFrameMs >= 100;
+    fpsHudAccumulator += deltaSeconds;
+
+    if (!hasFrameSpike && fpsHudAccumulator < 0.25) {
+      return;
+    }
+
+    fpsHudAccumulator = 0;
+    hud.setFps(
+      snapshot.averageFps,
+      snapshot.lastFrameMs,
+      snapshot.averageFps > 0 && (snapshot.averageFps < TARGET_FPS - 4 || hasFrameSpike)
+    );
+  }
+
+  function updateSmoothedAmbience(deltaSeconds: number): number {
+    const targetAmbienceLevel = state.phase === 'escaped' ? 0 : state.ambienceLevel;
+    const smoothingFactor = 1 - Math.exp(-deltaSeconds / AMBIENCE_SMOOTHING_SECONDS);
+    smoothedAmbienceLevel = THREE.MathUtils.lerp(
+      smoothedAmbienceLevel,
+      targetAmbienceLevel,
+      THREE.MathUtils.clamp(smoothingFactor, 0, 1)
+    );
+
+    if (Math.abs(smoothedAmbienceLevel - targetAmbienceLevel) < 0.01) {
+      smoothedAmbienceLevel = targetAmbienceLevel;
+    }
+
+    return smoothedAmbienceLevel;
+  }
+
+  function updateScreenTreatment(deltaSeconds: number, elapsedSeconds: number): void {
+    transitionVisualPulse = Math.max(0, transitionVisualPulse - deltaSeconds * 1.45);
+    anomalyVisualPulse = Math.max(0, anomalyVisualPulse - deltaSeconds * 0.95);
+
+    if (currentHallwayState.currentAnomalyId !== lastVisualAnomalyId) {
+      if (currentHallwayState.currentAnomalyId || lastVisualAnomalyId) {
+        anomalyVisualPulse = Math.max(anomalyVisualPulse, 1);
+      }
+      lastVisualAnomalyId = currentHallwayState.currentAnomalyId;
+    }
+
+    const transitionCurve = transitionVisualPulse * transitionVisualPulse;
+    const anomalyCurve = anomalyVisualPulse * anomalyVisualPulse;
+    const movement = THREE.MathUtils.clamp(playerMoveSpeed / 4.15, 0, 1);
+    const sprintNudge = input.sprint && movement > 0.1 ? 0.04 : 0;
+    const slowBreathing = Math.sin(elapsedSeconds * 0.73) * 0.5 + Math.sin(elapsedSeconds * 1.91) * 0.25;
+    const shake = 0.0012 + movement * 0.0015 + transitionCurve * 0.014 + anomalyCurve * 0.005;
+    const roll =
+      Math.sin(elapsedSeconds * 0.67) * 0.0015 +
+      Math.sin(elapsedSeconds * 1.37) * 0.0008 +
+      Math.sin(elapsedSeconds * 18.5) * transitionCurve * 0.007 +
+      Math.sin(elapsedSeconds * 11.2) * anomalyCurve * 0.0028;
+    const fov =
+      CAMERA_BASE_FOV +
+      slowBreathing * 0.1 +
+      movement * 0.05 +
+      transitionCurve * 0.55 +
+      anomalyCurve * 0.18;
+
+    camera.rotation.set(pitch, yaw, roll);
+    camera.position.copy(playerPosition);
+    camera.position.x += Math.sin(elapsedSeconds * 15.1) * shake;
+    camera.position.y += Math.cos(elapsedSeconds * 12.7) * shake * 0.45;
+
+    if (Math.abs(camera.fov - fov) > 0.01) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+
+    const fuzz = THREE.MathUtils.clamp(
+      BASE_SCREEN_FUZZ + movement * 0.09 + sprintNudge + transitionCurve * 0.46 + anomalyCurve * 0.22,
+      0,
+      1
+    );
+    const jitter = THREE.MathUtils.clamp(0.1 + movement * 0.08 + transitionCurve * 0.72 + anomalyCurve * 0.24, 0, 1);
+    hud.setScreenEffects(fuzz, jitter);
+    screenEffects.setState({
+      time: elapsedSeconds,
+      warp: BASE_LENS_WARP + transitionCurve * 0.03 + anomalyCurve * 0.012,
+      aberration: 0.0011 + movement * 0.00045 + transitionCurve * 0.0038 + anomalyCurve * 0.0015,
+      fuzz
+    });
+  }
+
+  function pulseScreenDistortion(amount: number): void {
+    transitionVisualPulse = Math.max(transitionVisualPulse, amount);
+  }
+
+  function renderFrame(): void {
+    screenEffects.render(scene, camera);
+  }
+
   function applyTransitionTuningToHallway(handles: HallwayHandles): void {
     for (const side of [-1, 1] as const) {
       const tuning = transitionTuning[sideKey(side)];
@@ -567,17 +802,6 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
         tuning.signRotationY
       );
     }
-  }
-
-  function paintTransitionSigns(
-    handles: HallwayHandles,
-    level: number,
-    targetLoops: number,
-    isEscaped: boolean,
-    outcome: 'idle' | 'correct' | 'wrong'
-  ): void {
-    setTransitionSign(handles, -1, level, targetLoops, isEscaped, outcome);
-    setTransitionSign(handles, 1, level, targetLoops, isEscaped, outcome);
   }
 
   function isWalkableWorld(x: number, z: number): boolean {
@@ -626,6 +850,195 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     return handles.root.worldToLocal(worldPosition.clone());
   }
 
+  function copyWorldToHallwayLocal(
+    handles: HallwayHandles,
+    worldPosition: THREE.Vector3,
+    target: THREE.Vector3
+  ): THREE.Vector3 {
+    return handles.root.worldToLocal(target.copy(worldPosition));
+  }
+
+  function getStandbyHallway(): HallwayCell {
+    if (!standbyHallway) {
+      standbyHallway = createHiddenHallwayCell(createHallwayScene(scene), state, WALKABLE_RECTS);
+      prepareStandbyHallway(state);
+    }
+
+    return standbyHallway;
+  }
+
+  function getQueuedPreviewHallway(): HallwayCell {
+    if (!queuedPreviewHallway) {
+      queuedPreviewHallway = createHiddenHallwayCell(
+        createHallwayScene(scene, { layout: 'queuedNext' }),
+        state,
+        QUEUED_HALLWAY_RECTS
+      );
+    }
+
+    return queuedPreviewHallway;
+  }
+
+  function scheduleHallwayPoolWarmup(): void {
+    scheduleIdleWork(() => {
+      if (isDestroyed || queuedPreviewHallway) {
+        return;
+      }
+
+      queuedPreviewHallway = createHiddenHallwayCell(
+        createHallwayScene(scene, { layout: 'queuedNext' }),
+        state,
+        QUEUED_HALLWAY_RECTS
+      );
+      scheduleIdleWork(() => {
+        if (isDestroyed || standbyHallway) {
+          return;
+        }
+
+        standbyHallway = createHiddenHallwayCell(createHallwayScene(scene), state, WALKABLE_RECTS);
+        prepareStandbyHallway(state);
+      });
+    });
+  }
+
+  function scheduleIdleWork(work: () => void): void {
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+    };
+
+    if (idleWindow.requestIdleCallback) {
+      idleWindow.requestIdleCallback(work, { timeout: 1500 });
+      return;
+    }
+
+    window.setTimeout(work, 250);
+  }
+
+  function createHiddenHallwayCell(
+    handles: HallwayHandles,
+    cellState: GameState,
+    walkableRects: BoundsRect[]
+  ): HallwayCell {
+    const cell = { handles, state: cellState, walkableRects };
+    hideHallwayCell(cell);
+    return cell;
+  }
+
+  function configureHallwayForState(cell: HallwayCell, cellState: GameState): void {
+    cell.state = cellState;
+    applyTransitionTuningToHallway(cell.handles);
+    applyAnomaly(cell.handles, cellState.currentAnomalyId);
+    updateAtmosphere(scene, cell.handles, cellState, smoothedAmbienceLevel);
+    setTransitionSignVisible(cell.handles, null);
+  }
+
+  function prepareStandbyHallway(nextState: GameState): void {
+    const standby = getStandbyHallway();
+    configureHallwayForState(standby, nextState);
+    standby.handles.root.position.set(0, 0, 0);
+    standby.handles.root.rotation.set(0, 0, 0);
+    standby.handles.root.updateMatrixWorld(true);
+    hideHallwayCell(standby);
+  }
+
+  function scheduleStandbyPreparation(nextState: GameState): void {
+    pendingStandbyState = nextState;
+    if (isStandbyPreparationScheduled) {
+      return;
+    }
+
+    isStandbyPreparationScheduled = true;
+    scheduleIdleWork(() => {
+      isStandbyPreparationScheduled = false;
+      const stateToPrepare = pendingStandbyState;
+      pendingStandbyState = null;
+
+      if (!stateToPrepare || isDestroyed) {
+        return;
+      }
+
+      prepareStandbyHallway(stateToPrepare);
+    });
+  }
+
+  function activateHallwayCell(cell: HallwayCell): void {
+    cell.handles.root.visible = true;
+    cell.handles.ambientLight.visible = true;
+  }
+
+  function hideHallwayCell(cell: HallwayCell): void {
+    cell.handles.root.visible = false;
+    cell.handles.ambientLight.visible = false;
+  }
+
+  function installAutomationHooks(): void {
+    installedAdvanceTime = (ms: number): void => {
+      const totalSeconds = Math.max(0, Math.min(ms / 1000, 2));
+      automationFrameAccumulator += totalSeconds;
+      let didAdvance = false;
+
+      while (automationFrameAccumulator >= TARGET_FRAME_SECONDS) {
+        automationFrameAccumulator -= TARGET_FRAME_SECONDS;
+        activeElapsedSeconds += TARGET_FRAME_SECONDS;
+        isAdvancingAutomation = true;
+        try {
+          update(TARGET_FRAME_SECONDS, activeElapsedSeconds);
+        } finally {
+          isAdvancingAutomation = false;
+        }
+        didAdvance = true;
+      }
+
+      const frameStart = performance.now();
+      renderFrame();
+      if (didAdvance) {
+        perf.record(performance.now() - frameStart, TARGET_FRAME_SECONDS);
+        updateFpsCounter(TARGET_FRAME_SECONDS);
+      }
+    };
+    window.advanceTime = installedAdvanceTime;
+
+    installedRenderGameToText = (): string => {
+      const local = copyWorldToHallwayLocal(hallway, playerPosition, hallwayLocalScratch);
+      const queuedLocal = nextHallway
+        ? copyWorldToHallwayLocal(nextHallway.handles, playerPosition, new THREE.Vector3())
+        : null;
+      const performanceSnapshot = perf.snapshot();
+      return JSON.stringify({
+        coordinateSystem: 'hallway local x/z, origin at active hallway center, +z toward the starting side',
+        mode: state.phase,
+        transitionPhase,
+        activeTransition: activeTransition
+          ? { side: activeTransition.side, phase: activeTransition.phase, choice: activeTransition.choice }
+          : null,
+        player: {
+          x: roundForText(local.x),
+          z: roundForText(local.z),
+          yaw: roundForText(yaw)
+        },
+        queuedPlayer: queuedLocal
+          ? { x: roundForText(queuedLocal.x), z: roundForText(queuedLocal.z) }
+          : null,
+        loopIndex: state.loopIndex,
+        targetLoops: state.targetLoops,
+        anomaly: currentHallwayState.currentAnomalyId,
+        ambienceLevel: state.ambienceLevel,
+        visibleAmbienceLevel: roundForText(smoothedAmbienceLevel),
+        hallwayWalker: hallwayWalker.snapshot(),
+        expectedAction: state.expectedAction,
+        fps: performanceSnapshot.averageFps,
+        targetFps: performanceSnapshot.targetFps,
+        renderMs: performanceSnapshot.averageRenderMs,
+        frameMs: performanceSnapshot.lastFrameMs,
+        renderer: {
+          calls: renderer.info.render.calls,
+          triangles: renderer.info.render.triangles
+        }
+      });
+    };
+    window.render_game_to_text = installedRenderGameToText;
+  }
+
   function disposeHallway(handles: HallwayHandles): void {
     scene.remove(handles.root);
     scene.remove(handles.ambientLight);
@@ -639,6 +1052,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   return {
     destroy(): void {
+      isDestroyed = true;
       stopRenderLoop();
       hud.prompt.removeEventListener('click', requestLock);
       canvas.removeEventListener('click', requestLock);
@@ -651,12 +1065,30 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       window.removeEventListener('blur', syncPauseState);
       window.removeEventListener('focus', syncPauseState);
       window.removeEventListener('pageshow', syncPauseState);
-      if (nextHallway) {
-        disposeHallway(nextHallway.handles);
+      const hallwaysToDispose = new Set<HallwayHandles>([hallway]);
+      if (standbyHallway) {
+        hallwaysToDispose.add(standbyHallway.handles);
       }
-      disposeHallway(hallway);
+      if (queuedPreviewHallway) {
+        hallwaysToDispose.add(queuedPreviewHallway.handles);
+      }
+      if (nextHallway) {
+        hallwaysToDispose.add(nextHallway.handles);
+      }
+
+      hallwayWalker.dispose();
+      for (const handles of hallwaysToDispose) {
+        disposeHallway(handles);
+      }
       audio.destroy();
+      screenEffects.dispose();
       renderer.dispose();
+      if (window.advanceTime === installedAdvanceTime) {
+        window.advanceTime = previousAdvanceTime;
+      }
+      if (window.render_game_to_text === installedRenderGameToText) {
+        window.render_game_to_text = previousRenderGameToText;
+      }
       root.replaceChildren();
     }
   };
@@ -669,7 +1101,9 @@ function createRenderer(canvas: HTMLCanvasElement): THREE.WebGLRenderer {
     powerPreference: 'high-performance'
   });
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = true;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.32;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -683,21 +1117,133 @@ function createScene(): THREE.Scene {
   return scene;
 }
 
+function createScreenEffectPass(renderer: THREE.WebGLRenderer): ScreenEffectPass {
+  const drawingBufferSize = new THREE.Vector2(1, 1);
+  const renderTarget = new THREE.WebGLRenderTarget(1, 1, {
+    depthBuffer: true,
+    stencilBuffer: false
+  });
+  renderTarget.texture.name = 'screen-effect-color';
+
+  const uniforms = {
+    tDiffuse: { value: renderTarget.texture },
+    time: { value: 0 },
+    warp: { value: BASE_LENS_WARP },
+    aberration: { value: 0.0011 },
+    fuzz: { value: BASE_SCREEN_FUZZ },
+    resolution: { value: new THREE.Vector2(1, 1) }
+  };
+  const geometry = new THREE.PlaneGeometry(2, 2);
+  const material = new THREE.ShaderMaterial({
+    uniforms,
+    depthTest: false,
+    depthWrite: false,
+    vertexShader: `
+      varying vec2 vUv;
+
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D tDiffuse;
+      uniform float time;
+      uniform float warp;
+      uniform float aberration;
+      uniform float fuzz;
+      uniform vec2 resolution;
+      varying vec2 vUv;
+
+      float random(vec2 value) {
+        return fract(sin(dot(value, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      void main() {
+        vec2 centered = vUv * 2.0 - 1.0;
+        float radius = dot(centered, centered);
+        float edge = smoothstep(0.34, 1.22, length(centered));
+        float horizontalDrift = sin(centered.y * 9.0 + time * 1.7) * fuzz * 0.0014;
+        float verticalDrift = sin(centered.x * 7.0 - time * 1.2) * fuzz * 0.0007;
+        vec2 warped = centered * (1.0 + warp * radius) + vec2(horizontalDrift, verticalDrift);
+        vec2 uv = warped * 0.5 + 0.5;
+        vec2 edgeDirection = normalize(centered + vec2(0.0001, -0.0001));
+        vec2 chroma = edgeDirection * aberration * (0.45 + radius);
+        vec3 color = vec3(
+          texture2D(tDiffuse, uv + chroma).r,
+          texture2D(tDiffuse, uv).g,
+          texture2D(tDiffuse, uv - chroma).b
+        );
+        vec2 blurStep = vec2(0.0015, 0.001) * fuzz * (0.25 + edge);
+        vec3 soft = (
+          texture2D(tDiffuse, uv + vec2(blurStep.x, 0.0)).rgb +
+          texture2D(tDiffuse, uv - vec2(blurStep.x, 0.0)).rgb +
+          texture2D(tDiffuse, uv + vec2(0.0, blurStep.y)).rgb +
+          texture2D(tDiffuse, uv - vec2(0.0, blurStep.y)).rgb
+        ) * 0.25;
+        color = mix(color, soft, edge * fuzz * 0.24);
+        float grain = random(floor(gl_FragCoord.xy * 0.68 + time * vec2(43.0, 19.0))) - 0.5;
+        color += grain * fuzz * 0.055;
+        color *= 1.0 - smoothstep(0.6, 1.42, length(centered)) * (0.16 + fuzz * 0.1);
+        color = mix(color, vec3(0.018, 0.052, 0.044), edge * warp * 0.14);
+        gl_FragColor = vec4(color, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `
+  });
+  material.toneMapped = true;
+
+  const postScene = new THREE.Scene();
+  const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const quad = new THREE.Mesh(geometry, material);
+  postScene.add(quad);
+
+  return {
+    setSize(): void {
+      renderer.getDrawingBufferSize(drawingBufferSize);
+      const width = Math.max(1, Math.round(drawingBufferSize.x));
+      const height = Math.max(1, Math.round(drawingBufferSize.y));
+      renderTarget.setSize(width, height);
+      uniforms.resolution.value.set(width, height);
+    },
+    setState(state: ScreenEffectState): void {
+      uniforms.time.value = state.time;
+      uniforms.warp.value = state.warp;
+      uniforms.aberration.value = state.aberration;
+      uniforms.fuzz.value = state.fuzz;
+    },
+    render(scene: THREE.Scene, camera: THREE.Camera): void {
+      renderer.setRenderTarget(renderTarget);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      renderer.render(postScene, postCamera);
+    },
+    dispose(): void {
+      renderTarget.dispose();
+      geometry.dispose();
+      material.dispose();
+    }
+  };
+}
+
 function resolveMovement(
   current: THREE.Vector3,
   candidate: THREE.Vector3,
-  isWalkable: (x: number, z: number) => boolean
+  isWalkable: (x: number, z: number) => boolean,
+  xOnly: THREE.Vector3,
+  zOnly: THREE.Vector3
 ): THREE.Vector3 {
   if (isWalkable(candidate.x, candidate.z)) {
     return candidate;
   }
 
-  const xOnly = new THREE.Vector3(candidate.x, PLAYER_HEIGHT, current.z);
+  xOnly.set(candidate.x, PLAYER_HEIGHT, current.z);
   if (isWalkable(xOnly.x, xOnly.z)) {
     return xOnly;
   }
 
-  const zOnly = new THREE.Vector3(current.x, PLAYER_HEIGHT, candidate.z);
+  zOnly.set(current.x, PLAYER_HEIGHT, candidate.z);
   if (isWalkable(zOnly.x, zOnly.z)) {
     return zOnly;
   }
@@ -745,10 +1291,64 @@ function formatNumber(value: number): string {
   return value.toFixed(2);
 }
 
+function roundForText(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function createFramePerformanceTracker(): FramePerformance {
+  const maxSamples = 90;
+  const renderSamples: number[] = [];
+  const deltaSamples: number[] = [];
+  let lastRenderMs = 0;
+  let lastFrameMs = 0;
+
+  return {
+    record(renderCostMs: number, frameDeltaSeconds: number): void {
+      lastRenderMs = renderCostMs;
+      lastFrameMs = frameDeltaSeconds * 1000;
+      renderSamples.push(renderCostMs);
+      deltaSamples.push(frameDeltaSeconds);
+
+      if (renderSamples.length > maxSamples) {
+        renderSamples.shift();
+        deltaSamples.shift();
+      }
+    },
+    snapshot() {
+      const averageRenderMs = average(renderSamples);
+      const averageDelta = average(deltaSamples);
+      return {
+        targetFps: TARGET_FPS,
+        averageFps: averageDelta > 0 ? Math.round((1 / averageDelta) * 10) / 10 : 0,
+        averageRenderMs: Math.round(averageRenderMs * 10) / 10,
+        lastRenderMs: Math.round(lastRenderMs * 10) / 10,
+        lastFrameMs: Math.round(lastFrameMs * 10) / 10
+      };
+    }
+  };
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
 interface HorrorAudio {
   resume(): void;
   suspend(): void;
-  update(state: GameState, elapsedSeconds: number): void;
+  update(
+    state: GameState,
+    ambienceLevel: number,
+    elapsedSeconds: number,
+    movementSpeed: number,
+    isSprinting: boolean,
+    walker: HallwayWalkerSnapshot,
+    playerPosition: THREE.Vector3,
+    listenerYaw: number
+  ): void;
   destroy(): void;
 }
 
@@ -758,9 +1358,29 @@ function createHorrorAudio(): HorrorAudio {
   let context: AudioContext | null = null;
   let hum: OscillatorNode | null = null;
   let drone: OscillatorNode | null = null;
+  let buzz: OscillatorNode | null = null;
+  let flickerNoise: AudioBufferSourceNode | null = null;
   let humGain: GainNode | null = null;
   let droneGain: GainNode | null = null;
+  let buzzGain: GainNode | null = null;
+  let flickerGain: GainNode | null = null;
+  let dryBus: GainNode | null = null;
+  let roomSend: GainNode | null = null;
+  let roomReturn: GainNode | null = null;
+  let footstepEchoDelay: DelayNode | null = null;
+  let footstepEchoFeedback: GainNode | null = null;
+  let footstepEchoReturn: GainNode | null = null;
+  let masterGain: GainNode | null = null;
   let filter: BiquadFilterNode | null = null;
+  let buzzFilter: BiquadFilterNode | null = null;
+  let flickerFilter: BiquadFilterNode | null = null;
+  let roomReverb: ConvolverNode | null = null;
+  let recordedFootstepBuffer: AudioBuffer | null = null;
+  let recordedFootstepLoad: Promise<void> | null = null;
+  let nextFootstepTime = 0;
+  let footstepIndex = 0;
+  let lastWalkerFootstepId = 0;
+  let walkerFootstepIndex = 0;
 
   const ensureContext = (): void => {
     if (context || !AudioContextCtor) {
@@ -770,23 +1390,215 @@ function createHorrorAudio(): HorrorAudio {
     context = new AudioContextCtor();
     hum = context.createOscillator();
     drone = context.createOscillator();
+    buzz = context.createOscillator();
+    flickerNoise = context.createBufferSource();
     humGain = context.createGain();
     droneGain = context.createGain();
+    buzzGain = context.createGain();
+    flickerGain = context.createGain();
+    dryBus = context.createGain();
+    roomSend = context.createGain();
+    roomReturn = context.createGain();
+    footstepEchoDelay = context.createDelay(0.8);
+    footstepEchoFeedback = context.createGain();
+    footstepEchoReturn = context.createGain();
+    masterGain = context.createGain();
     filter = context.createBiquadFilter();
+    buzzFilter = context.createBiquadFilter();
+    flickerFilter = context.createBiquadFilter();
+    roomReverb = context.createConvolver();
 
     hum.type = 'sawtooth';
     hum.frequency.value = 59.7;
     drone.type = 'sine';
     drone.frequency.value = 36;
+    buzz.type = 'square';
+    buzz.frequency.value = 119.4;
+    flickerNoise.buffer = createLoopingNoiseBuffer(context, 1.7);
+    flickerNoise.loop = true;
     filter.type = 'lowpass';
     filter.frequency.value = 360;
+    buzzFilter.type = 'bandpass';
+    buzzFilter.frequency.value = 1850;
+    buzzFilter.Q.value = 7;
+    flickerFilter.type = 'highpass';
+    flickerFilter.frequency.value = 2600;
+    roomReverb.buffer = createRoomImpulse(context, 2.7, 2.45);
     humGain.gain.value = 0.018;
     droneGain.gain.value = 0.004;
+    buzzGain.gain.value = 0.0028;
+    flickerGain.gain.value = 0.0014;
+    dryBus.gain.value = 0.92;
+    roomSend.gain.value = 0.34;
+    roomReturn.gain.value = 0.48;
+    footstepEchoDelay.delayTime.value = 0.28;
+    footstepEchoFeedback.gain.value = 0.08;
+    footstepEchoReturn.gain.value = 0.2;
+    masterGain.gain.value = 0.76;
 
-    hum.connect(humGain).connect(filter).connect(context.destination);
-    drone.connect(droneGain).connect(context.destination);
+    hum.connect(humGain).connect(filter);
+    filter.connect(dryBus);
+    filter.connect(roomSend);
+    drone.connect(droneGain);
+    droneGain.connect(dryBus);
+    droneGain.connect(roomSend);
+    buzz.connect(buzzGain).connect(buzzFilter);
+    buzzFilter.connect(dryBus);
+    buzzFilter.connect(roomSend);
+    flickerNoise.connect(flickerFilter).connect(flickerGain);
+    flickerGain.connect(dryBus);
+    flickerGain.connect(roomSend);
+    dryBus.connect(masterGain);
+    roomSend.connect(roomReverb).connect(roomReturn).connect(masterGain);
+    footstepEchoDelay.connect(footstepEchoReturn).connect(masterGain);
+    footstepEchoReturn.connect(footstepEchoFeedback).connect(footstepEchoDelay);
+    masterGain.connect(context.destination);
     hum.start();
     drone.start();
+    buzz.start();
+    flickerNoise.start();
+    loadRecordedFootsteps();
+  };
+
+  const loadRecordedFootsteps = (): void => {
+    if (!context || recordedFootstepLoad) {
+      return;
+    }
+
+    const targetContext = context;
+    recordedFootstepLoad = fetch(FOOTSTEP_SAMPLE_PATH)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((audioData) => targetContext.decodeAudioData(audioData))
+      .then((decodedBuffer) => {
+        if (context === targetContext) {
+          recordedFootstepBuffer = decodedBuffer;
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn(`Could not load footstep sample ${FOOTSTEP_SAMPLE_PATH}`, error);
+      });
+  };
+
+  const updateFootsteps = (movementSpeed: number, isSprinting: boolean, ambience: number): void => {
+    if (!context || context.state !== 'running' || movementSpeed < 0.12) {
+      nextFootstepTime = 0;
+      return;
+    }
+
+    const now = context.currentTime;
+    if (nextFootstepTime <= 0 || nextFootstepTime < now - 0.08) {
+      nextFootstepTime = now + 0.03;
+    }
+
+    const baseInterval = isSprinting ? 0.34 : 0.52;
+    const pace = clampNumber(baseInterval - (movementSpeed - 2.4) * 0.035, 0.3, 0.62);
+    const intensity = clampNumber(
+      (isSprinting ? 0.82 : 0.64) + movementSpeed * 0.065 + ambience * 0.035,
+      0.62,
+      1.08
+    );
+
+    while (nextFootstepTime <= now + 0.08) {
+      playFootstep(nextFootstepTime, {
+        intensity,
+        index: footstepIndex,
+        ambience,
+        pan: (footstepIndex % 2 === 0 ? -1 : 1) * 0.12,
+        echo: 0.8,
+        room: 0.72,
+        lowpass: 1
+      });
+      nextFootstepTime += pace;
+      footstepIndex += 1;
+    }
+  };
+
+  const updateWalkerFootsteps = (
+    walker: HallwayWalkerSnapshot,
+    player: THREE.Vector3,
+    ambience: number,
+    listenerYaw: number
+  ): void => {
+    if (!context || context.state !== 'running' || !walker.visible || !walker.walking) {
+      lastWalkerFootstepId = walker.stepId;
+      return;
+    }
+
+    if (walker.stepId === lastWalkerFootstepId) {
+      return;
+    }
+
+    lastWalkerFootstepId = walker.stepId;
+
+    const distance = Math.hypot(walker.x - player.x, walker.z - player.z);
+    const distanceVolume = clampNumber(1 / (1 + distance * 0.18), 0.18, 0.88);
+    const pan = getListenerRelativePan(walker.x - player.x, walker.z - player.z, listenerYaw);
+    const room = clampNumber(0.32 + distance * 0.035 + ambience * 0.025, 0.35, 0.72);
+    const echo = clampNumber(0.18 + distance * 0.018 + ambience * 0.018, 0.18, 0.48);
+
+    playFootstep(context.currentTime + 0.015, {
+      intensity: distanceVolume * (0.96 + ambience * 0.035),
+      index: walkerFootstepIndex,
+      ambience,
+      pan,
+      echo,
+      room,
+      lowpass: 1
+    });
+    walkerFootstepIndex += 1;
+  };
+
+  interface FootstepOptions {
+    intensity: number;
+    index: number;
+    ambience: number;
+    pan: number;
+    echo: number;
+    room: number;
+    lowpass: number;
+  }
+
+  const playFootstep = (time: number, options: FootstepOptions): void => {
+    if (!context || !dryBus || !roomSend || !footstepEchoDelay || !recordedFootstepBuffer) {
+      return;
+    }
+
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    const panner = context.createStereoPanner();
+    const dryGain = context.createGain();
+    const roomGain = context.createGain();
+    const echoGain = context.createGain();
+    const stepDuration = RECORDED_FOOTSTEP_SLICE_DURATION;
+    const sampleOffset = getRecordedFootstepOffset(recordedFootstepBuffer, options.index, stepDuration);
+
+    source.buffer = recordedFootstepBuffer;
+    source.playbackRate.setValueAtTime(1, time);
+    panner.pan.setValueAtTime(options.pan * 0.85, time);
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.linearRampToValueAtTime(0.88 * options.intensity, time + 0.006);
+    gain.gain.linearRampToValueAtTime(0.0001, time + stepDuration);
+    dryGain.gain.setValueAtTime(0.88, time);
+    roomGain.gain.setValueAtTime(options.room * 0.22, time);
+    echoGain.gain.setValueAtTime(options.echo * 0.1, time);
+    source.connect(gain).connect(panner);
+    panner.connect(dryGain).connect(dryBus);
+    panner.connect(roomGain).connect(roomSend);
+    panner.connect(echoGain).connect(footstepEchoDelay);
+    source.start(time, sampleOffset, stepDuration);
+    source.onended = () => {
+      source.disconnect();
+      gain.disconnect();
+      panner.disconnect();
+      dryGain.disconnect();
+      roomGain.disconnect();
+      echoGain.disconnect();
+    };
   };
 
   return {
@@ -799,29 +1611,148 @@ function createHorrorAudio(): HorrorAudio {
         void context.suspend();
       }
     },
-    update(state: GameState, elapsedSeconds: number): void {
-      if (!context || !hum || !drone || !humGain || !droneGain || !filter) {
+    update(
+      state: GameState,
+      ambienceLevel: number,
+      elapsedSeconds: number,
+      movementSpeed: number,
+    isSprinting: boolean,
+    walker: HallwayWalkerSnapshot,
+    playerPosition: THREE.Vector3,
+    listenerYaw: number
+  ): void {
+      if (
+        !context ||
+        !hum ||
+        !drone ||
+        !buzz ||
+        !humGain ||
+        !droneGain ||
+        !buzzGain ||
+        !flickerGain ||
+        !roomSend ||
+        !roomReturn ||
+        !footstepEchoReturn ||
+        !footstepEchoFeedback ||
+        !filter ||
+        !buzzFilter ||
+        !flickerFilter
+      ) {
         return;
       }
 
-      const ambience = state.ambienceLevel;
+      const ambience = state.phase === 'escaped' ? 0 : ambienceLevel;
       const wobble = Math.sin(elapsedSeconds * 1.9) * 2.2;
+      const flicker = Math.max(
+        0,
+        Math.sin(elapsedSeconds * 8.7) * 0.55 + Math.sin(elapsedSeconds * 17.3) * 0.28
+      );
       hum.frequency.setTargetAtTime(59.7 + ambience * 0.35 + wobble, context.currentTime, 0.08);
       drone.frequency.setTargetAtTime(36 + ambience * 1.2, context.currentTime, 0.1);
+      buzz.frequency.setTargetAtTime(
+        119.4 + ambience * 0.8 + Math.sin(elapsedSeconds * 5.2) * 0.5,
+        context.currentTime,
+        0.06
+      );
       humGain.gain.setTargetAtTime(0.017 + ambience * 0.004, context.currentTime, 0.08);
       droneGain.gain.setTargetAtTime(0.004 + ambience * 0.005, context.currentTime, 0.08);
+      buzzGain.gain.setTargetAtTime(0.0027 + ambience * 0.0007 + flicker * 0.0014, context.currentTime, 0.04);
+      flickerGain.gain.setTargetAtTime(0.001 + ambience * 0.00055 + flicker * 0.001, context.currentTime, 0.045);
       filter.frequency.setTargetAtTime(360 + ambience * 56, context.currentTime, 0.12);
+      buzzFilter.frequency.setTargetAtTime(1800 + ambience * 120 + flicker * 380, context.currentTime, 0.05);
+      flickerFilter.frequency.setTargetAtTime(2600 + ambience * 140 + flicker * 500, context.currentTime, 0.05);
+      roomSend.gain.setTargetAtTime(0.34 + ambience * 0.035, context.currentTime, 0.12);
+      roomReturn.gain.setTargetAtTime(0.48 + ambience * 0.025, context.currentTime, 0.12);
+      footstepEchoReturn.gain.setTargetAtTime(0.2 + ambience * 0.018, context.currentTime, 0.1);
+      footstepEchoFeedback.gain.setTargetAtTime(0.08 + ambience * 0.01, context.currentTime, 0.1);
+      updateFootsteps(movementSpeed, isSprinting, ambience);
+      updateWalkerFootsteps(walker, playerPosition, ambience, listenerYaw);
     },
     destroy(): void {
       hum?.stop();
       drone?.stop();
+      buzz?.stop();
+      flickerNoise?.stop();
       void context?.close();
       context = null;
       hum = null;
       drone = null;
+      buzz = null;
+      flickerNoise = null;
       humGain = null;
       droneGain = null;
+      buzzGain = null;
+      flickerGain = null;
+      dryBus = null;
+      roomSend = null;
+      roomReturn = null;
+      footstepEchoDelay = null;
+      footstepEchoFeedback = null;
+      footstepEchoReturn = null;
+      masterGain = null;
       filter = null;
+      buzzFilter = null;
+      flickerFilter = null;
+      roomReverb = null;
+      recordedFootstepBuffer = null;
+      recordedFootstepLoad = null;
+      nextFootstepTime = 0;
+      lastWalkerFootstepId = 0;
+      walkerFootstepIndex = 0;
     }
   };
+}
+
+function getRecordedFootstepOffset(buffer: AudioBuffer, index: number, stepDuration: number): number {
+  const detectedOffset = RECORDED_FOOTSTEP_SEGMENT_OFFSETS[index % RECORDED_FOOTSTEP_SEGMENT_OFFSETS.length];
+  const latestSafeOffset = Math.max(0, buffer.duration - stepDuration - 0.01);
+  return Math.min(detectedOffset, latestSafeOffset);
+}
+
+function getListenerRelativePan(deltaX: number, deltaZ: number, listenerYaw: number): number {
+  const distance = Math.hypot(deltaX, deltaZ);
+  if (distance <= 0.001) {
+    return 0;
+  }
+
+  const rightX = Math.cos(listenerYaw);
+  const rightZ = -Math.sin(listenerYaw);
+  return clampNumber((deltaX * rightX + deltaZ * rightZ) / distance, -0.95, 0.95);
+}
+
+function createLoopingNoiseBuffer(context: BaseAudioContext, seconds: number): AudioBuffer {
+  const length = Math.max(1, Math.floor(context.sampleRate * seconds));
+  const buffer = context.createBuffer(1, length, context.sampleRate);
+  const channel = buffer.getChannelData(0);
+  let pink = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    pink = pink * 0.86 + (Math.random() * 2 - 1) * 0.14;
+    channel[index] = pink;
+  }
+
+  return buffer;
+}
+
+function createRoomImpulse(context: BaseAudioContext, seconds: number, decayPower: number): AudioBuffer {
+  const length = Math.max(1, Math.floor(context.sampleRate * seconds));
+  const buffer = context.createBuffer(2, length, context.sampleRate);
+
+  for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex += 1) {
+    const channel = buffer.getChannelData(channelIndex);
+    let smear = 0;
+
+    for (let index = 0; index < length; index += 1) {
+      const progress = index / length;
+      const decay = Math.pow(1 - progress, decayPower);
+      smear = smear * 0.64 + (Math.random() * 2 - 1) * 0.36;
+      channel[index] = smear * decay * (channelIndex === 0 ? 0.78 : 0.72);
+    }
+  }
+
+  return buffer;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

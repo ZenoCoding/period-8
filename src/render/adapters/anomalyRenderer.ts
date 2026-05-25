@@ -29,9 +29,10 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
     case null:
       break;
     case 'locker-ajar':
+      handles.lockerDoor.visible = true;
+      handles.lockerInterior.visible = true;
       handles.lockerDoor.rotation.y = -0.82;
-      handles.lockerDoor.position.x -= 0.08;
-      handles.lockerDoor.position.z -= 0.19;
+      handles.lockerDoor.position.x -= 0.05;
       handles.lockerInteriorMaterial.emissive.setHex(0x160302);
       handles.lockerInteriorMaterial.emissiveIntensity = 0.4;
       break;
@@ -87,10 +88,11 @@ export function updateAnomaly(
 export function updateAtmosphere(
   scene: THREE.Scene,
   handles: HallwayHandles,
-  state: GameState
+  state: GameState,
+  ambienceLevel = state.ambienceLevel
 ): void {
   const escalation =
-    state.phase === 'escaped' ? 0 : THREE.MathUtils.clamp(state.ambienceLevel / MAX_AMBIENCE, 0, 1);
+    state.phase === 'escaped' ? 0 : THREE.MathUtils.clamp(ambienceLevel / MAX_AMBIENCE, 0, 1);
   const materialEscalation = Math.min(1, escalation * 0.82);
 
   if (scene.background instanceof THREE.Color) {
@@ -121,6 +123,8 @@ function resetAnomalies(handles: HallwayHandles): void {
   restoreTransform(handles.securityCameraHead, handles.snapshots);
   restoreTransform(handles.ventCover, handles.snapshots);
 
+  handles.lockerDoor.visible = false;
+  handles.lockerInterior.visible = false;
   handles.lockerInteriorMaterial.emissive.setHex(0x050202);
   handles.lockerInteriorMaterial.emissiveIntensity = 0;
   handles.clockSecondPivot.visible = false;

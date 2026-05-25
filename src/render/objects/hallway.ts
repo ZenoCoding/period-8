@@ -1,7 +1,10 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 
 RectAreaLightUniformsLib.init();
+
+THREE.Cache.enabled = true;
 
 export interface BoundsRect {
   xMin: number;
@@ -44,6 +47,36 @@ export interface EnvironmentMaterials {
   floor: THREE.MeshStandardMaterial;
   ceiling: THREE.MeshStandardMaterial;
   trim: THREE.MeshStandardMaterial;
+}
+
+interface BoxSurfaceScale {
+  px: [number, number];
+  nx: [number, number];
+  py: [number, number];
+  ny: [number, number];
+  pz: [number, number];
+  nz: [number, number];
+}
+
+interface PbrMaterialOptions {
+  color: number;
+  colorMap: string;
+  roughnessMap?: string;
+  normalMap: string;
+  aoMap?: string;
+  metalnessMap?: string;
+  roughness: number;
+  metalness: number;
+  normalScale?: number;
+}
+
+type ModelFitAxis = 'x' | 'y' | 'z';
+
+interface ModelPlacementOptions {
+  fitSize?: THREE.Vector3;
+  fitAxes?: ModelFitAxis[];
+  center?: THREE.Vector3;
+  rotation?: THREE.Euler;
 }
 
 export type TransitionSignSide = -1 | 1;
@@ -123,15 +156,202 @@ export interface HallwaySceneOptions {
 
 const WALL_HEIGHT = 3.6;
 const WALL_CENTER_Y = WALL_HEIGHT / 2;
-const FLOOR_Y = -0.05;
-const CEILING_Y = WALL_HEIGHT + 0.05;
+const FLOOR_SURFACE_Y = 0;
+const CEILING_SURFACE_Y = WALL_HEIGHT;
+const FLOOR_TEXTURE_SCALE = 2.2;
 const POSITIVE_WALL_FACE_X = MAIN_HALF_WIDTH - 0.015;
 const NEGATIVE_WALL_FACE_X = -MAIN_HALF_WIDTH + 0.015;
+const TEXTURE_ROOT = '/textures/ambientcg';
+const MODEL_ROOT = '/models/hallway';
+const textureLoader = new THREE.TextureLoader();
+const gltfLoader = new GLTFLoader();
+const textureCache = new Map<string, THREE.Texture>();
+const modelCache = new Map<string, Promise<THREE.Group>>();
 
 interface ShellOptions {
   walkableRects: BoundsRect[];
   transitionFrameSides: TransitionSignSide[];
   openMainPositiveSide: boolean;
+}
+
+interface FluorescentLightOptions {
+  intensityScale: number;
+  activeLightCount: number;
+  castShadows: boolean;
+}
+
+function createPbrMaterial(options: PbrMaterialOptions): THREE.MeshStandardMaterial {
+  const material = new THREE.MeshStandardMaterial({
+    color: options.color,
+    map: loadTexture(options.colorMap, true),
+    normalMap: loadTexture(options.normalMap, false),
+    roughness: options.roughness,
+    metalness: options.metalness
+  });
+
+  material.normalScale.setScalar(options.normalScale ?? 0.45);
+
+  if (options.roughnessMap) {
+    material.roughnessMap = loadTexture(options.roughnessMap, false);
+  }
+
+  if (options.aoMap) {
+    material.aoMap = loadTexture(options.aoMap, false);
+    material.aoMapIntensity = 0.72;
+  }
+
+  if (options.metalnessMap) {
+    material.metalnessMap = loadTexture(options.metalnessMap, false);
+  }
+
+  return material;
+}
+
+function loadTexture(path: string, isColor: boolean): THREE.Texture {
+  const cached = textureCache.get(path);
+  if (cached) {
+    return cached;
+  }
+
+  const texture = textureLoader.load(path);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 4;
+  texture.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  textureCache.set(path, texture);
+  return texture;
+}
+
+function loadModelInto(
+  path: string,
+  parent: THREE.Object3D,
+  fallback?: THREE.Object3D,
+  placement?: ModelPlacementOptions
+): void {
+  void getModel(path)
+    .then((source) => {
+      const instance = source.clone(true);
+      instance.name = `${source.name || 'imported-model'}-instance`;
+      applyModelPlacement(instance, placement);
+      instance.traverse((object) => {
+        if (object instanceof THREE.Mesh) {
+          object.castShadow = true;
+          object.receiveShadow = true;
+        }
+      });
+      parent.add(instance);
+
+      if (fallback) {
+        fallback.visible = false;
+      }
+    })
+    .catch((error: unknown) => {
+      console.warn(`Could not load hallway model ${path}`, error);
+    });
+}
+
+function applyModelPlacement(instance: THREE.Object3D, placement?: ModelPlacementOptions): void {
+  if (!placement) {
+    return;
+  }
+
+  if (placement.rotation) {
+    instance.rotation.copy(placement.rotation);
+  }
+
+  if (!placement.fitSize && !placement.center) {
+    return;
+  }
+
+  instance.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(instance);
+  if (bounds.isEmpty()) {
+    return;
+  }
+
+  if (placement.fitSize) {
+    const currentSize = bounds.getSize(new THREE.Vector3());
+    const axes = placement.fitAxes ?? ['x', 'y', 'z'];
+    const scale = axes.reduce((best, axis) => {
+      const source = currentSize[axis];
+      const target = placement.fitSize?.[axis] ?? 0;
+      if (source <= 0 || target <= 0) {
+        return best;
+      }
+      return Math.min(best, target / source);
+    }, Number.POSITIVE_INFINITY);
+
+    if (Number.isFinite(scale) && scale > 0) {
+      instance.scale.multiplyScalar(scale);
+      instance.updateMatrixWorld(true);
+      bounds.setFromObject(instance);
+    }
+  }
+
+  if (placement.center) {
+    const currentCenter = bounds.getCenter(new THREE.Vector3());
+    instance.position.add(placement.center.clone().sub(currentCenter));
+  }
+}
+
+function getModel(path: string): Promise<THREE.Group> {
+  const cached = modelCache.get(path);
+  if (cached) {
+    return cached;
+  }
+
+  const load = gltfLoader.loadAsync(path).then((gltf) => gltf.scene);
+  modelCache.set(path, load);
+  return load;
+}
+
+function createWallMaterial(): THREE.MeshStandardMaterial {
+  return createPbrMaterial({
+    color: 0xfffbf2,
+    colorMap: `${TEXTURE_ROOT}/Plaster001/Plaster001_1K-JPG_Color.jpg`,
+    roughnessMap: `${TEXTURE_ROOT}/Plaster001/Plaster001_1K-JPG_Roughness.jpg`,
+    normalMap: `${TEXTURE_ROOT}/Plaster001/Plaster001_1K-JPG_NormalGL.jpg`,
+    roughness: 0.94,
+    metalness: 0.01,
+    normalScale: 0.04
+  });
+}
+
+function createFloorMaterial(): THREE.MeshStandardMaterial {
+  return createPbrMaterial({
+    color: 0xf1f3ee,
+    colorMap: `${TEXTURE_ROOT}/Tiles107/Tiles107_1K-JPG_Color.jpg`,
+    normalMap: `${TEXTURE_ROOT}/Tiles107/Tiles107_1K-JPG_NormalGL.jpg`,
+    aoMap: `${TEXTURE_ROOT}/Tiles107/Tiles107_1K-JPG_AmbientOcclusion.jpg`,
+    roughness: 0.93,
+    metalness: 0.02,
+    normalScale: 0.16
+  });
+}
+
+function createWoodMaterial(color = 0xd1b58f): THREE.MeshStandardMaterial {
+  return createPbrMaterial({
+    color,
+    colorMap: `${TEXTURE_ROOT}/Wood095/Wood095_1K-JPG_Color.jpg`,
+    roughnessMap: `${TEXTURE_ROOT}/Wood095/Wood095_1K-JPG_Roughness.jpg`,
+    normalMap: `${TEXTURE_ROOT}/Wood095/Wood095_1K-JPG_NormalGL.jpg`,
+    roughness: 0.56,
+    metalness: 0.02,
+    normalScale: 0.25
+  });
+}
+
+function createCleanMetalMaterial(color = 0xb8c0bd, metalness = 0.42): THREE.MeshStandardMaterial {
+  return createPbrMaterial({
+    color,
+    colorMap: `${TEXTURE_ROOT}/Metal032/Metal032_1K-JPG_Color.jpg`,
+    roughnessMap: `${TEXTURE_ROOT}/Metal032/Metal032_1K-JPG_Roughness.jpg`,
+    normalMap: `${TEXTURE_ROOT}/Metal032/Metal032_1K-JPG_NormalGL.jpg`,
+    metalnessMap: `${TEXTURE_ROOT}/Metal032/Metal032_1K-JPG_Metalness.jpg`,
+    roughness: 0.46,
+    metalness,
+    normalScale: 0.18
+  });
 }
 
 function createTransitionRects(side: TransitionSignSide): BoundsRect[] {
@@ -160,25 +380,15 @@ export function createHallwayScene(scene: THREE.Scene, options: HallwaySceneOpti
   scene.add(root);
 
   const snapshots = new Map<THREE.Object3D, TransformSnapshot>();
-  const wall = new THREE.MeshStandardMaterial({
-    color: 0xfff7ed,
-    roughness: 0.76,
-    metalness: 0.01
-  });
-  const floor = new THREE.MeshStandardMaterial({
-    color: 0xe7e9e2,
-    roughness: 0.72,
-    metalness: 0.02
-  });
-  const ceiling = new THREE.MeshStandardMaterial({
-    color: 0xfffdf8,
-    roughness: 0.78,
-    metalness: 0.01
-  });
+  const wall = createWallMaterial();
+  const floor = createFloorMaterial();
+  const ceiling = createWallMaterial();
+  ceiling.color.setHex(0xf3f0e8);
+  ceiling.normalScale.setScalar(0.1);
   const trim = new THREE.MeshStandardMaterial({
-    color: 0xc7beb2,
-    roughness: 0.6,
-    metalness: 0.12
+    color: 0xa39f96,
+    roughness: 0.68,
+    metalness: 0.08
   });
   const environmentMaterials = { wall, floor, ceiling, trim };
 
@@ -187,14 +397,18 @@ export function createHallwayScene(scene: THREE.Scene, options: HallwaySceneOpti
     transitionFrameSides: isQueuedNext ? [-1] : [-1, 1],
     openMainPositiveSide: isQueuedNext
   });
-  addTileGrid(root, walkableRects);
+  addScuffDecals(root, createNonOverlappingRects(walkableRects));
 
-  const ambientLight = new THREE.HemisphereLight(0xf4f9ff, 0xd8dee5, 1.05);
+  const ambientLight = new THREE.HemisphereLight(0xf4f9ff, 0xc1c7c2, 0.72);
   if (!isQueuedNext) {
     scene.add(ambientLight);
   }
 
-  const lightHandles = addFluorescentLights(root, 1);
+  const lightHandles = addFluorescentLights(root, {
+    intensityScale: isQueuedNext ? 0.48 : 1,
+    activeLightCount: isQueuedNext ? 3 : 6,
+    castShadows: !isQueuedNext
+  });
   const propHandles = addProps(root, snapshots);
   root.updateMatrixWorld(true);
 
@@ -269,17 +483,91 @@ function addHallwayShell(
   trimMaterial: THREE.Material,
   options: ShellOptions
 ): void {
-  for (const rect of options.walkableRects) {
-    const width = rect.xMax - rect.xMin;
-    const depth = rect.zMax - rect.zMin;
-    const x = (rect.xMin + rect.xMax) / 2;
-    const z = (rect.zMin + rect.zMax) / 2;
-
-    addBox(root, 'floor-panel', [width, 0.1, depth], [x, FLOOR_Y, z], floorMaterial, false, true);
-    addBox(root, 'ceiling-panel', [width, 0.1, depth], [x, CEILING_Y, z], ceilingMaterial, false, false);
+  for (const rect of createNonOverlappingRects(options.walkableRects)) {
+    addHorizontalSurface(root, 'floor-panel', rect, FLOOR_SURFACE_Y, floorMaterial, 'up');
+    addHorizontalSurface(root, 'ceiling-panel', rect, CEILING_SURFACE_Y, ceilingMaterial, 'down');
   }
 
   addBoundaryWalls(root, wallMaterial, trimMaterial, options);
+}
+
+function createNonOverlappingRects(rects: BoundsRect[]): BoundsRect[] {
+  const xs = getSortedBreakpoints(rects.flatMap((rect) => [rect.xMin, rect.xMax]));
+  const zs = getSortedBreakpoints(rects.flatMap((rect) => [rect.zMin, rect.zMax]));
+  const cells: BoundsRect[] = [];
+
+  for (let xIndex = 0; xIndex < xs.length - 1; xIndex += 1) {
+    for (let zIndex = 0; zIndex < zs.length - 1; zIndex += 1) {
+      const xMin = xs[xIndex];
+      const xMax = xs[xIndex + 1];
+      const zMin = zs[zIndex];
+      const zMax = zs[zIndex + 1];
+      const x = (xMin + xMax) / 2;
+      const z = (zMin + zMax) / 2;
+
+      if (xMax - xMin > 0.01 && zMax - zMin > 0.01 && isInsideWalkableRect(x, z, rects)) {
+        cells.push({ xMin, xMax, zMin, zMax });
+      }
+    }
+  }
+
+  return cells;
+}
+
+function getSortedBreakpoints(values: number[]): number[] {
+  return [...new Set(values.map((value) => Number(value.toFixed(4))))]
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+}
+
+function addHorizontalSurface(
+  parent: THREE.Object3D,
+  name: string,
+  rect: BoundsRect,
+  y: number,
+  material: THREE.Material,
+  side: 'up' | 'down'
+): THREE.Mesh {
+  const geometry = createWorldAlignedSurfaceGeometry(rect, y, side);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = name;
+  mesh.receiveShadow = side === 'up';
+  parent.add(mesh);
+  return mesh;
+}
+
+function createWorldAlignedSurfaceGeometry(
+  rect: BoundsRect,
+  y: number,
+  side: 'up' | 'down'
+): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  const { xMin, xMax, zMin, zMax } = rect;
+  const positions = new Float32Array([
+    xMin, y, zMin,
+    xMax, y, zMin,
+    xMax, y, zMax,
+    xMin, y, zMax
+  ]);
+  const normalY = side === 'up' ? 1 : -1;
+  const normals = new Float32Array([
+    0, normalY, 0,
+    0, normalY, 0,
+    0, normalY, 0,
+    0, normalY, 0
+  ]);
+  const uvs = new Float32Array([
+    xMin / FLOOR_TEXTURE_SCALE, zMin / FLOOR_TEXTURE_SCALE,
+    xMax / FLOOR_TEXTURE_SCALE, zMin / FLOOR_TEXTURE_SCALE,
+    xMax / FLOOR_TEXTURE_SCALE, zMax / FLOOR_TEXTURE_SCALE,
+    xMin / FLOOR_TEXTURE_SCALE, zMax / FLOOR_TEXTURE_SCALE
+  ]);
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute('uv2', new THREE.BufferAttribute(uvs.slice(), 2));
+  geometry.setIndex(side === 'up' ? [0, 2, 1, 0, 3, 2] : [0, 1, 2, 0, 2, 3]);
+  return geometry;
 }
 
 const BASEBOARD_HEIGHT = 0.16;
@@ -351,6 +639,7 @@ function addVerticalBoundary(
         trimMaterial
       );
     }
+    addWallRailZ(root, 'boundary-ceiling-rail-z', x - side * BASEBOARD_THICKNESS / 2, interval.start, interval.end, trimMaterial);
   }
 }
 
@@ -438,6 +727,7 @@ function addHorizontalBoundary(
     const wallZ = z + side * WALL_THICKNESS / 2;
     addBox(root, 'boundary-wall-x', [length, WALL_HEIGHT, WALL_THICKNESS], [wallX, WALL_CENTER_Y, wallZ], wallMaterial);
     addBaseboardX(root, 'boundary-baseboard-x', interval.start, interval.end, z - side * BASEBOARD_THICKNESS / 2, trimMaterial);
+    addWallRailX(root, 'boundary-ceiling-rail-x', interval.start, interval.end, z - side * BASEBOARD_THICKNESS / 2, trimMaterial);
   }
 }
 
@@ -589,41 +879,131 @@ function addBaseboardZ(
   );
 }
 
-function addTileGrid(root: THREE.Group, walkableRects: BoundsRect[]): void {
-  const lineMaterial = new THREE.LineBasicMaterial({
-    color: 0xa8afaa,
+function addWallRailX(
+  parent: THREE.Object3D,
+  name: string,
+  xStart: number,
+  xEnd: number,
+  z: number,
+  material: THREE.Material
+): THREE.Mesh {
+  const xMin = Math.min(xStart, xEnd);
+  const xMax = Math.max(xStart, xEnd);
+  return addBox(
+    parent,
+    name,
+    [xMax - xMin, 0.06, BASEBOARD_THICKNESS],
+    [(xMin + xMax) / 2, WALL_HEIGHT - 0.16, z],
+    material
+  );
+}
+
+function addWallRailZ(
+  parent: THREE.Object3D,
+  name: string,
+  x: number,
+  zStart: number,
+  zEnd: number,
+  material: THREE.Material
+): THREE.Mesh {
+  const zMin = Math.min(zStart, zEnd);
+  const zMax = Math.max(zStart, zEnd);
+  return addBox(
+    parent,
+    name,
+    [BASEBOARD_THICKNESS, 0.06, zMax - zMin],
+    [x, WALL_HEIGHT - 0.16, (zMin + zMax) / 2],
+    material
+  );
+}
+
+function addScuffDecals(root: THREE.Group, walkableRects: BoundsRect[]): void {
+  const wallScuffMaterial = new THREE.MeshBasicMaterial({
+    map: createScuffTexture(1024, 256, 0.14),
+    color: 0x6c7069,
     transparent: true,
-    opacity: 0.28
+    opacity: 0.15,
+    depthWrite: false
   });
-  const positions: number[] = [];
 
   for (const rect of walkableRects) {
-    for (let x = Math.ceil(rect.xMin); x <= Math.floor(rect.xMax); x += 1) {
-      positions.push(x, 0.012, rect.zMin, x, 0.012, rect.zMax);
-    }
-    for (let z = Math.ceil(rect.zMin); z <= Math.floor(rect.zMax); z += 1) {
-      positions.push(rect.xMin, 0.014, z, rect.xMax, 0.014, z);
+    const width = rect.xMax - rect.xMin;
+    const depth = rect.zMax - rect.zMin;
+    const centerZ = (rect.zMin + rect.zMax) / 2;
+
+    if (depth > width) {
+      addWallScuff(root, wallScuffMaterial, rect.xMin + 0.004, centerZ, depth, -1);
+      addWallScuff(root, wallScuffMaterial, rect.xMax - 0.004, centerZ, depth, 1);
     }
   }
+}
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  const grid = new THREE.LineSegments(geometry, lineMaterial);
-  grid.name = 'floor-grid';
-  root.add(grid);
+function addWallScuff(
+  root: THREE.Group,
+  material: THREE.Material,
+  x: number,
+  z: number,
+  width: number,
+  side: -1 | 1
+): void {
+  const scuff = new THREE.Mesh(new THREE.PlaneGeometry(width, 0.44), material);
+  scuff.name = 'wall-scuff-decals';
+  scuff.position.set(x, 0.4, z);
+  scuff.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+  root.add(scuff);
+}
+
+function createScuffTexture(width: number, height: number, strength: number): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create scuff texture canvas context.');
+  }
+
+  context.clearRect(0, 0, width, height);
+  for (let index = 0; index < 120; index += 1) {
+    const t = index * 12.9898;
+    const x = ((Math.sin(t) * 43758.5453) % 1 + 1) % 1;
+    const y = ((Math.sin(t * 1.71) * 21942.381) % 1 + 1) % 1;
+    const smudgeWidth = 18 + (((Math.sin(t * 0.53) * 912.3) % 1 + 1) % 1) * 130;
+    const smudgeHeight = 4 + (((Math.sin(t * 0.37) * 713.7) % 1 + 1) % 1) * 28;
+    context.fillStyle = `rgba(25, 28, 26, ${strength * (0.18 + (index % 5) * 0.035)})`;
+    context.beginPath();
+    context.ellipse(x * width, y * height, smudgeWidth, smudgeHeight, Math.sin(t) * 0.22, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const gradient = context.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  gradient.addColorStop(0.65, `rgba(0, 0, 0, ${strength * 0.25})`);
+  gradient.addColorStop(1, `rgba(0, 0, 0, ${strength})`);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function addFluorescentLights(
   root: THREE.Group,
-  lightIntensityScale: number
+  options: FluorescentLightOptions
 ): Pick<HallwayHandles, 'flickerLight' | 'flickerTubeMaterial'> {
-  const tubeMaterial = new THREE.MeshStandardMaterial({
+  const tubeMaterial = new THREE.MeshPhysicalMaterial({
     color: 0xf6fbff,
     emissive: 0xdbf0ff,
     emissiveIntensity: 1.85,
-    roughness: 0.2
+    roughness: 0.16,
+    transmission: 0.05,
+    clearcoat: 0.4
   });
   const dimTubeMaterial = tubeMaterial.clone();
+  const fixtureMaterial = createCleanMetalMaterial(0xcbd1d0, 0.28);
   const lightSpecs = [
     { x: 0, z: 4.5, rotY: 0, intensity: 13.8 },
     { x: 0, z: -3.3, rotY: 0, intensity: 12.8 },
@@ -633,7 +1013,7 @@ function addFluorescentLights(
     { x: 0, z: -21.2, rotY: 0, intensity: 10.4 }
   ];
 
-  let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 11.6 * lightIntensityScale, 0.34, 1.78);
+  let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 0, 0.34, 1.78);
 
   for (const [index, spec] of lightSpecs.entries()) {
     const group = new THREE.Group();
@@ -647,7 +1027,7 @@ function addFluorescentLights(
 
     const fixture = new THREE.Mesh(
       new THREE.BoxGeometry(0.3, 0.07, 1.78),
-      new THREE.MeshStandardMaterial({ color: 0xd7dce0, roughness: 0.58, metalness: 0.16 })
+      fixtureMaterial
     );
     fixture.position.y = 0.035;
     group.add(fixture);
@@ -655,7 +1035,7 @@ function addFluorescentLights(
     const isRotated = Math.abs(spec.rotY) > 0.01;
     const light = new THREE.RectAreaLight(
       0xe2f2ff,
-      spec.intensity * lightIntensityScale,
+      index < options.activeLightCount ? spec.intensity * options.intensityScale : 0,
       isRotated ? 1.78 : 0.34,
       isRotated ? 0.34 : 1.78
     );
@@ -666,6 +1046,22 @@ function addFluorescentLights(
 
     if (index === 2) {
       flickerLight = light;
+    }
+
+    if (options.castShadows && (index === 0 || index === 2)) {
+      const spot = new THREE.SpotLight(0xdcecff, 1.8 * options.intensityScale, 7, 0.82, 0.74, 1.2);
+      spot.name = `${group.name}-shadow-light`;
+      spot.position.set(spec.x, WALL_HEIGHT - 0.34, spec.z);
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(256, 256);
+      spot.shadow.bias = -0.00018;
+      spot.shadow.camera.near = 0.2;
+      spot.shadow.camera.far = 7;
+      const target = new THREE.Object3D();
+      target.name = `${group.name}-shadow-target`;
+      target.position.set(spec.x, 0, spec.z);
+      root.add(spot, target);
+      spot.target = target;
     }
 
     root.add(group);
@@ -731,16 +1127,8 @@ function getTransitionSignRotation(side: TransitionSignSide): number {
 }
 
 function addClassroomDoors(root: THREE.Group): void {
-  const doorMaterial = new THREE.MeshStandardMaterial({
-    color: 0xd8c7aa,
-    roughness: 0.58,
-    metalness: 0.02
-  });
-  const doorFrameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x8c8175,
-    roughness: 0.54,
-    metalness: 0.12
-  });
+  const doorMaterial = createWoodMaterial(0xcabca5);
+  const doorFrameMaterial = createCleanMetalMaterial(0x9a9087, 0.22);
   const darkRoomMaterial = new THREE.MeshStandardMaterial({
     color: 0x050607,
     emissive: 0x020303,
@@ -748,22 +1136,21 @@ function addClassroomDoors(root: THREE.Group): void {
     roughness: 0.94,
     metalness: 0.02
   });
-  const glassMaterial = new THREE.MeshStandardMaterial({
+  const glassMaterial = new THREE.MeshPhysicalMaterial({
     color: 0x1f2a31,
     emissive: 0x020406,
     emissiveIntensity: 0.18,
-    roughness: 0.18,
+    roughness: 0.08,
     metalness: 0.08,
+    transmission: 0.12,
+    clearcoat: 0.6,
+    clearcoatRoughness: 0.2,
     transparent: true,
-    opacity: 0.86
+    opacity: 0.78
   });
-  const handleMaterial = new THREE.MeshStandardMaterial({
-    color: 0xcab77a,
-    roughness: 0.34,
-    metalness: 0.52
-  });
+  const handleMaterial = createCleanMetalMaterial(0xcab77a, 0.58);
 
-  addClassroomDoor(root, {
+  addImportedClassroomDoor(root, {
     name: 'classroom-door-101',
     position: new THREE.Vector3(POSITIVE_WALL_FACE_X, 0.04, 4.95),
     rotationY: -Math.PI / 2,
@@ -774,7 +1161,7 @@ function addClassroomDoors(root: THREE.Group): void {
     glassMaterial,
     handleMaterial
   });
-  addClassroomDoor(root, {
+  addImportedClassroomDoor(root, {
     name: 'classroom-door-102',
     position: new THREE.Vector3(NEGATIVE_WALL_FACE_X, 0.04, -2.3),
     rotationY: Math.PI / 2,
@@ -797,6 +1184,25 @@ interface ClassroomDoorOptions {
   darkRoomMaterial: THREE.Material;
   glassMaterial: THREE.Material;
   handleMaterial: THREE.Material;
+}
+
+function addImportedClassroomDoor(root: THREE.Group, options: ClassroomDoorOptions): void {
+  const importedDoor = new THREE.Group();
+  importedDoor.name = `${options.name}-imported`;
+  importedDoor.position.copy(options.position);
+  importedDoor.rotation.y = options.rotationY;
+  root.add(importedDoor);
+
+  const fallback = new THREE.Group();
+  fallback.name = `${options.name}-procedural-fallback`;
+  root.add(fallback);
+  addClassroomDoor(fallback, options);
+
+  loadModelInto(`${MODEL_ROOT}/classroom-door.glb`, importedDoor, fallback, {
+    fitSize: new THREE.Vector3(1.18, 2.34, 0.12),
+    fitAxes: ['x', 'y'],
+    center: new THREE.Vector3(0, 1.18, 0.01)
+  });
 }
 
 function addClassroomDoor(root: THREE.Group, options: ClassroomDoorOptions): void {
@@ -873,6 +1279,15 @@ function addClassroomDoor(root: THREE.Group, options: ClassroomDoorOptions): voi
     options.doorMaterial
   );
   addBox(leaf, `${options.name}-window-shadow`, [windowWidth, windowHeight, 0.012], [0, windowCenterY, -0.016], options.darkRoomMaterial);
+  addRectangularFrame(leaf, `${options.name}-window-frame`, {
+    outerWidth: windowWidth + 0.08,
+    outerHeight: windowHeight + 0.08,
+    thickness: 0.035,
+    depth: 0.018,
+    bottom: windowBottom - 0.04,
+    z: 0.018,
+    material: options.doorFrameMaterial
+  });
   addBox(
     leaf,
     `${options.name}-window-glass`,
@@ -882,7 +1297,18 @@ function addClassroomDoor(root: THREE.Group, options: ClassroomDoorOptions): voi
     false,
     false
   );
-  addBox(leaf, `${options.name}-handle`, [0.055, 0.055, 0.055], [0.39, 1.0, 0.042], options.handleMaterial);
+  addBox(leaf, `${options.name}-kick-plate`, [0.7, 0.28, 0.012], [0.02, 0.34, 0.034], options.handleMaterial);
+  addBox(leaf, `${options.name}-handle`, [0.065, 0.065, 0.065], [0.39, 1.0, 0.048], options.handleMaterial);
+  addBox(leaf, `${options.name}-latch-plate`, [0.025, 0.22, 0.012], [0.47, 1.0, 0.04], options.handleMaterial);
+  for (let index = 0; index < 3; index += 1) {
+    addBox(
+      leaf,
+      `${options.name}-hinge-${index}`,
+      [0.035, 0.18, 0.018],
+      [-0.52, 0.62 + index * 0.58, 0.043],
+      options.handleMaterial
+    );
+  }
 
   const labelTexture = createDoorLabelTexture(options.label);
   const labelMaterial = new THREE.MeshStandardMaterial({
@@ -1103,39 +1529,70 @@ function addLockers(
   lockerGroup.name = 'lockers';
   root.add(lockerGroup);
 
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x244f83, roughness: 0.52, metalness: 0.22 });
-  const doorMaterial = new THREE.MeshStandardMaterial({ color: 0x3577b6, roughness: 0.5, metalness: 0.18 });
-  const handleMaterial = new THREE.MeshStandardMaterial({ color: 0xe2dccf, roughness: 0.42, metalness: 0.38 });
+  const bodyMaterial = createCleanMetalMaterial(0x244f83, 0.34);
+  const doorMaterial = createCleanMetalMaterial(0x3577b6, 0.36);
+  const handleMaterial = createCleanMetalMaterial(0xe2dccf, 0.46);
   const lockerInteriorMaterial = new THREE.MeshStandardMaterial({
     color: 0x060707,
     emissive: 0x050202,
     roughness: 1
   });
 
-  let anomalyDoor: THREE.Object3D = new THREE.Object3D();
-  let lockerInterior: THREE.Mesh = new THREE.Mesh();
+  const fallback = new THREE.Group();
+  fallback.name = 'lockers-procedural-fallback';
+  lockerGroup.add(fallback);
 
   for (let index = 0; index < 3; index += 1) {
     const z = 2.85 - index * 0.82;
-    addBox(lockerGroup, `locker-body-${index}`, [0.48, 1.62, 0.72], [MAIN_HALF_WIDTH - 0.28, 0.86, z], bodyMaterial);
-    const interior = addBox(
-      lockerGroup,
-      `locker-interior-${index}`,
-      [0.04, 1.44, 0.58],
-      [MAIN_HALF_WIDTH - 0.54, 0.92, z],
-      lockerInteriorMaterial,
+    addBox(fallback, `locker-body-${index}`, [0.48, 1.62, 0.72], [MAIN_HALF_WIDTH - 0.28, 0.86, z], bodyMaterial);
+    if (index !== 1) {
+      addBox(fallback, `locker-door-${index}`, [0.045, 1.45, 0.61], [MAIN_HALF_WIDTH - 0.57, 0.93, z], doorMaterial);
+      addBox(fallback, `locker-handle-${index}`, [0.04, 0.18, 0.035], [MAIN_HALF_WIDTH - 0.61, 1.05, z - 0.21], handleMaterial);
+    }
+  }
+
+  const lockerInterior = addBox(
+    lockerGroup,
+    'locker-interior-anomaly',
+    [0.035, 1.34, 0.38],
+    [MAIN_HALF_WIDTH - 0.49, 0.92, 2.03],
+    lockerInteriorMaterial,
+    false,
+    false
+  );
+  lockerInterior.visible = false;
+
+  const anomalyDoor = new THREE.Group();
+  anomalyDoor.name = 'locker-door-anomaly-pivot';
+  anomalyDoor.position.set(MAIN_HALF_WIDTH - 0.51, 0, 1.82);
+  anomalyDoor.visible = false;
+  lockerGroup.add(anomalyDoor);
+  addBox(anomalyDoor, 'locker-door-anomaly-panel', [0.035, 1.45, 0.42], [0, 0.93, 0.21], doorMaterial);
+  addBox(anomalyDoor, 'locker-door-anomaly-handle', [0.035, 0.2, 0.025], [-0.035, 1.05, 0.06], handleMaterial);
+  for (let index = 0; index < 4; index += 1) {
+    addBox(
+      anomalyDoor,
+      `locker-door-anomaly-vent-${index}`,
+      [0.012, 0.012, 0.16],
+      [-0.024, 1.34 - index * 0.055, 0.27],
+      handleMaterial,
       false,
       false
     );
-    const door = addBox(lockerGroup, `locker-door-${index}`, [0.045, 1.45, 0.61], [MAIN_HALF_WIDTH - 0.57, 0.93, z], doorMaterial);
-    addBox(lockerGroup, `locker-handle-${index}`, [0.04, 0.18, 0.035], [MAIN_HALF_WIDTH - 0.61, 1.05, z - 0.21], handleMaterial);
-
-    if (index === 1) {
-      anomalyDoor = door;
-      lockerInterior = interior;
-      snapshotTransform(anomalyDoor, snapshots);
-    }
   }
+
+  const importedBank = new THREE.Group();
+  importedBank.name = 'locker-bank-imported';
+  importedBank.position.set(MAIN_HALF_WIDTH - 0.28, 0, 2.03);
+  lockerGroup.add(importedBank);
+
+  loadModelInto(`${MODEL_ROOT}/locker-bank.glb`, importedBank, fallback, {
+    rotation: new THREE.Euler(-Math.PI / 2, Math.PI / 2, 0),
+    fitSize: new THREE.Vector3(0.48, 1.86, 1.48),
+    fitAxes: ['y', 'z'],
+    center: new THREE.Vector3(0, 0.96, 0)
+  });
+  snapshotTransform(anomalyDoor, snapshots);
 
   return {
     lockerDoor: anomalyDoor,
@@ -1158,19 +1615,44 @@ function addClock(
   clockPlane.rotation.y = Math.PI / 2;
   clockGroup.add(clockPlane);
 
+  const clockFace = new THREE.Group();
+  clockFace.name = 'wall-clock-face';
+  clockPlane.add(clockFace);
+
   const face = new THREE.Mesh(
     new THREE.CircleGeometry(0.34, 56),
-    new THREE.MeshStandardMaterial({ color: 0xe4e6d9, roughness: 0.72, metalness: 0.02 })
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: createClockFaceTexture(),
+      roughness: 0.68,
+      metalness: 0.01
+    })
   );
   face.position.z = 0.006;
-  clockPlane.add(face);
+  clockFace.add(face);
 
   const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(0.35, 0.018, 8, 48),
-    new THREE.MeshStandardMaterial({ color: 0x2d3430, roughness: 0.5, metalness: 0.2 })
+    new THREE.TorusGeometry(0.35, 0.026, 10, 64),
+    new THREE.MeshStandardMaterial({ color: 0x3c2b21, roughness: 0.48, metalness: 0.08 })
   );
   rim.position.z = 0.018;
-  clockPlane.add(rim);
+  clockFace.add(rim);
+
+  const glass = new THREE.Mesh(
+    new THREE.CircleGeometry(0.322, 56),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xf8ffff,
+      roughness: 0.04,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.22,
+      transmission: 0.25,
+      clearcoat: 0.85,
+      clearcoatRoughness: 0.08
+    })
+  );
+  glass.position.z = 0.027;
+  clockFace.add(glass);
 
   const tickMaterial = new THREE.MeshStandardMaterial({ color: 0x1f2623, roughness: 0.58 });
   for (let index = 0; index < 12; index += 1) {
@@ -1178,7 +1660,7 @@ function addClock(
     const tick = new THREE.Mesh(new THREE.BoxGeometry(index % 3 === 0 ? 0.018 : 0.011, 0.052, 0.01), tickMaterial);
     tick.position.set(Math.sin(angle) * 0.27, Math.cos(angle) * 0.27, 0.026);
     tick.rotation.z = -angle;
-    clockPlane.add(tick);
+    clockFace.add(tick);
   }
 
   const hourPivot = new THREE.Object3D();
@@ -1225,12 +1707,56 @@ function createClockHand(length: number, width: number, material: THREE.Material
   return pivot;
 }
 
+function createClockFaceTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 512;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create clock face canvas context.');
+  }
+
+  context.fillStyle = '#f3f0df';
+  context.beginPath();
+  context.arc(256, 256, 240, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = '#221f1b';
+  context.lineWidth = 8;
+  context.stroke();
+  context.fillStyle = '#171715';
+  context.font = '700 42px Arial, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+
+  for (let hour = 1; hour <= 12; hour += 1) {
+    const angle = (hour / 12) * Math.PI * 2;
+    context.fillText(String(hour), 256 + Math.sin(angle) * 168, 256 - Math.cos(angle) * 168 + 2);
+  }
+
+  context.strokeStyle = '#1b1b18';
+  context.lineWidth = 4;
+  for (let minute = 0; minute < 60; minute += 1) {
+    const angle = (minute / 60) * Math.PI * 2;
+    const outer = 222;
+    const inner = minute % 5 === 0 ? 204 : 214;
+    context.beginPath();
+    context.moveTo(256 + Math.sin(angle) * inner, 256 - Math.cos(angle) * inner);
+    context.lineTo(256 + Math.sin(angle) * outer, 256 - Math.cos(angle) * outer);
+    context.stroke();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function addSecurityCamera(
   root: THREE.Group,
   snapshots: Map<THREE.Object3D, TransformSnapshot>
 ): Pick<HallwayHandles, 'securityCameraHead' | 'securityCameraLensMaterial'> {
-  const mountMaterial = new THREE.MeshStandardMaterial({ color: 0x4d5651, roughness: 0.62, metalness: 0.22 });
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xb8c1bb, roughness: 0.47, metalness: 0.08 });
+  const mountMaterial = createCleanMetalMaterial(0x4d5651, 0.35);
+  const bodyMaterial = createCleanMetalMaterial(0xb8c1bb, 0.18);
   const securityCameraLensMaterial = new THREE.MeshStandardMaterial({
     color: 0x07100e,
     emissive: 0x001a0e,
@@ -1273,7 +1799,7 @@ function addVent(
   root: THREE.Group,
   snapshots: Map<THREE.Object3D, TransformSnapshot>
 ): Pick<HallwayHandles, 'ventCover' | 'ventDarkness'> {
-  const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8c9790, roughness: 0.68, metalness: 0.14 });
+  const frameMaterial = createCleanMetalMaterial(0x8c9790, 0.25);
   const darknessMaterial = new THREE.MeshStandardMaterial({
     color: 0x010202,
     emissive: 0x010202,
@@ -1344,11 +1870,49 @@ function addBox(
   castShadow = true,
   receiveShadow = true
 ): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+  const geometry = createBoxGeometry(size);
+  const mesh = new THREE.Mesh(geometry, material);
   mesh.name = name;
   mesh.position.set(...position);
   mesh.castShadow = castShadow;
   mesh.receiveShadow = receiveShadow;
   parent.add(mesh);
   return mesh;
+}
+
+function createBoxGeometry(size: [number, number, number]): THREE.BoxGeometry {
+  const geometry = new THREE.BoxGeometry(...size);
+  applyBoxUvScale(geometry, getBoxSurfaceScale(size));
+  const uv = geometry.getAttribute('uv');
+  geometry.setAttribute('uv2', uv.clone());
+  return geometry;
+}
+
+function getBoxSurfaceScale([width, height, depth]: [number, number, number]): BoxSurfaceScale {
+  const wallScale = 3.6;
+  const floorScale = 2.2;
+
+  return {
+    px: [depth / wallScale, height / wallScale],
+    nx: [depth / wallScale, height / wallScale],
+    py: [width / floorScale, depth / floorScale],
+    ny: [width / floorScale, depth / floorScale],
+    pz: [width / wallScale, height / wallScale],
+    nz: [width / wallScale, height / wallScale]
+  };
+}
+
+function applyBoxUvScale(geometry: THREE.BoxGeometry, scale: BoxSurfaceScale): void {
+  const uv = geometry.getAttribute('uv');
+  const scales = [scale.px, scale.nx, scale.py, scale.ny, scale.pz, scale.nz];
+
+  for (const [faceIndex, [uScale, vScale]] of scales.entries()) {
+    const offset = faceIndex * 4;
+    uv.setXY(offset, 0, vScale);
+    uv.setXY(offset + 1, uScale, vScale);
+    uv.setXY(offset + 2, 0, 0);
+    uv.setXY(offset + 3, uScale, 0);
+  }
+
+  uv.needsUpdate = true;
 }
