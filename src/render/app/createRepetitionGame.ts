@@ -4,7 +4,7 @@ import { ANOMALY_BY_ID } from '../../game/simulation/anomalies';
 import { createInitialGameState, resolveTimedAnomalyTimeout } from '../../game/simulation/gameState';
 import type { GameState } from '../../game/simulation/types';
 import { createHud, renderHud } from '../../ui/hud';
-import { applyAnomaly, updateAnomaly, updateAtmosphere } from '../adapters/anomalyRenderer';
+import { applyAnomaly, updateAnomaly, updateAtmosphere, type LightFailureEffectState } from '../adapters/anomalyRenderer';
 import {
   createHallwayScene,
   MAIN_HALF_LENGTH,
@@ -63,6 +63,9 @@ const CAMERA_BASE_FOV = 74;
 const BASE_SCREEN_FUZZ = 0.34;
 const BASE_LENS_WARP = 0.012;
 const AMBIENCE_SMOOTHING_SECONDS = 1.4;
+const LIGHT_FAILURE_DELAY_SECONDS = 5;
+const LIGHT_FAILURE_MIDDLE_Z = 1.15;
+const LIGHT_FAILURE_BLACKOUT_SECONDS = 2.2;
 const NEGATIVE_HALLWAY_START = new THREE.Vector3(
   0,
   PLAYER_HEIGHT,
@@ -80,6 +83,7 @@ const MAIN_INTERIOR_Z_MIN = -MAIN_HALF_LENGTH + 0.55;
 const MAIN_INTERIOR_Z_MAX = MAIN_HALF_LENGTH - 0.55;
 const COMMITTED_VIEW_LIMIT = 1.22;
 const FOOTSTEP_SAMPLE_PATH = '/audio/footsteps/freesound-community-footsteps-in-a-hallway-47842.mp3?v=raw-segments-2';
+const LIGHT_FAILURE_SAMPLE_PATH = '/audio/lights/fluorescent-light-flickering-unstuntedsfx.mp3';
 const RECORDED_FOOTSTEP_SLICE_DURATION = 0.52;
 const RECORDED_FOOTSTEP_SEGMENT_OFFSETS = [
   0.62,
@@ -134,6 +138,11 @@ interface ScreenEffectPass {
   dispose(): void;
 }
 
+interface LightFailureCueState extends LightFailureEffectState {
+  active: boolean;
+  justTriggered: boolean;
+}
+
 export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   root.replaceChildren();
 
@@ -184,6 +193,10 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let smoothedAmbienceLevel = state.ambienceLevel;
   let activeTimedAnomalyId: GameState['currentAnomalyId'] = null;
   let timedThreatElapsed = 0;
+  let lightFailureElapsed = 0;
+  let lightFailureBlackoutElapsed = 0;
+  let hasLightFailureBlackoutStarted = false;
+  let didCueLightFailureAudio = false;
   let playerMoveSpeed = 0;
   const clock = new THREE.Clock();
   const playerPosition = NEGATIVE_HALLWAY_START.clone();
@@ -319,12 +332,13 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     }
 
     const timedThreatProgress = updateTimedThreat(deltaSeconds);
-    updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds, timedThreatProgress);
+    const lightFailure = updateLightFailureCue(deltaSeconds);
+    updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds, timedThreatProgress, lightFailure);
     if (nextHallway) {
       updateAnomaly(nextHallway.handles, nextHallway.state, playerPosition, elapsedSeconds);
     }
     const visibleAmbienceLevel = updateSmoothedAmbience(deltaSeconds);
-    updateAtmosphere(scene, hallway, state, visibleAmbienceLevel);
+    updateAtmosphere(scene, hallway, state, visibleAmbienceLevel, lightFailure.progress);
     if (nextHallway) {
       updateAtmosphere(scene, nextHallway.handles, state, visibleAmbienceLevel);
     }
@@ -343,7 +357,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       input.sprint,
       hallwayWalker.snapshot(),
       playerPosition,
-      yaw
+      yaw,
+      lightFailure
     );
   };
 
@@ -720,6 +735,9 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       activeTimedAnomalyId
         ? `Timed threat: ${formatNumber(getTimedThreatProgress() * 100)}% (${formatNumber(timedThreatElapsed)}s)`
         : '',
+      currentHallwayState.currentAnomalyId === 'light-failure'
+        ? `Light failure: ${hasLightFailureBlackoutStarted ? 'blackout' : 'armed'} ${formatNumber(lightFailureElapsed)}s`
+        : '',
       formatTransitionTuning(transitionTuning),
       'Debug tuning: C commit, V sign, R reset',
       debugNotice ? `Last: ${debugNotice}` : ''
@@ -793,6 +811,50 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     return anomaly?.timedThreatSeconds
       ? THREE.MathUtils.clamp(timedThreatElapsed / anomaly.timedThreatSeconds, 0, 1)
       : 0;
+  }
+
+  function updateLightFailureCue(deltaSeconds: number): LightFailureCueState {
+    if (currentHallwayState.currentAnomalyId !== 'light-failure' || state.phase !== 'playing') {
+      lightFailureElapsed = 0;
+      lightFailureBlackoutElapsed = 0;
+      hasLightFailureBlackoutStarted = false;
+      didCueLightFailureAudio = false;
+      return {
+        active: false,
+        progress: 0,
+        sparkPulse: 0,
+        justTriggered: false
+      };
+    }
+
+    lightFailureElapsed += deltaSeconds;
+    const local = worldToHallwayLocal(hallway, playerPosition);
+    const reachedMiddle = Math.abs(local.z) <= LIGHT_FAILURE_MIDDLE_Z;
+    if (!hasLightFailureBlackoutStarted && (lightFailureElapsed >= LIGHT_FAILURE_DELAY_SECONDS || reachedMiddle)) {
+      hasLightFailureBlackoutStarted = true;
+      lightFailureBlackoutElapsed = 0;
+    }
+
+    let justTriggered = false;
+    if (hasLightFailureBlackoutStarted) {
+      lightFailureBlackoutElapsed += deltaSeconds;
+      justTriggered = !didCueLightFailureAudio;
+      didCueLightFailureAudio = true;
+    }
+
+    const progress = hasLightFailureBlackoutStarted
+      ? THREE.MathUtils.clamp(lightFailureBlackoutElapsed / LIGHT_FAILURE_BLACKOUT_SECONDS, 0, 1)
+      : 0;
+    const sparkPulse = hasLightFailureBlackoutStarted
+      ? Math.max(0, Math.sin(progress * Math.PI * 3.2)) * (1 - THREE.MathUtils.smoothstep(progress, 0.45, 1))
+      : 0;
+
+    return {
+      active: true,
+      progress,
+      sparkPulse,
+      justTriggered
+    };
   }
 
   function resetFromTimedThreat(): void {
@@ -1124,6 +1186,17 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
               progress: roundForText(getTimedThreatProgress())
             }
           : null,
+        lightFailure: currentHallwayState.currentAnomalyId === 'light-failure'
+          ? {
+              elapsed: roundForText(lightFailureElapsed),
+              blackoutStarted: hasLightFailureBlackoutStarted,
+              progress: roundForText(
+                hasLightFailureBlackoutStarted
+                  ? THREE.MathUtils.clamp(lightFailureBlackoutElapsed / LIGHT_FAILURE_BLACKOUT_SECONDS, 0, 1)
+                  : 0
+              )
+            }
+          : null,
         ambienceLevel: state.ambienceLevel,
         visibleAmbienceLevel: roundForText(smoothedAmbienceLevel),
         hallwayWalker: hallwayWalker.snapshot(),
@@ -1449,7 +1522,8 @@ interface HorrorAudio {
     isSprinting: boolean,
     walker: HallwayWalkerSnapshot,
     playerPosition: THREE.Vector3,
-    listenerYaw: number
+    listenerYaw: number,
+    lightFailure: LightFailureCueState
   ): void;
   destroy(): void;
 }
@@ -1479,6 +1553,8 @@ function createHorrorAudio(): HorrorAudio {
   let roomReverb: ConvolverNode | null = null;
   let recordedFootstepBuffer: AudioBuffer | null = null;
   let recordedFootstepLoad: Promise<void> | null = null;
+  let lightFailureBuffer: AudioBuffer | null = null;
+  let lightFailureLoad: Promise<void> | null = null;
   let nextFootstepTime = 0;
   let footstepIndex = 0;
   let lastWalkerFootstepId = 0;
@@ -1560,6 +1636,7 @@ function createHorrorAudio(): HorrorAudio {
     buzz.start();
     flickerNoise.start();
     loadRecordedFootsteps();
+    loadLightFailureSample();
   };
 
   const loadRecordedFootsteps = (): void => {
@@ -1583,6 +1660,30 @@ function createHorrorAudio(): HorrorAudio {
       })
       .catch((error: unknown) => {
         console.warn(`Could not load footstep sample ${FOOTSTEP_SAMPLE_PATH}`, error);
+      });
+  };
+
+  const loadLightFailureSample = (): void => {
+    if (!context || lightFailureLoad) {
+      return;
+    }
+
+    const targetContext = context;
+    lightFailureLoad = fetch(LIGHT_FAILURE_SAMPLE_PATH)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((audioData) => targetContext.decodeAudioData(audioData))
+      .then((decodedBuffer) => {
+        if (context === targetContext) {
+          lightFailureBuffer = decodedBuffer;
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn(`Could not load light failure sample ${LIGHT_FAILURE_SAMPLE_PATH}`, error);
       });
   };
 
@@ -1703,6 +1804,86 @@ function createHorrorAudio(): HorrorAudio {
     };
   };
 
+  const playLightFailureSound = (time: number): void => {
+    if (!context || !dryBus || !roomSend) {
+      return;
+    }
+
+    if (lightFailureBuffer) {
+      const source = context.createBufferSource();
+      const gain = context.createGain();
+      const filterNode = context.createBiquadFilter();
+      const roomGain = context.createGain();
+      source.buffer = lightFailureBuffer;
+      source.playbackRate.setValueAtTime(0.86, time);
+      filterNode.type = 'bandpass';
+      filterNode.frequency.setValueAtTime(1800, time);
+      filterNode.frequency.exponentialRampToValueAtTime(420, time + 1.2);
+      filterNode.Q.setValueAtTime(1.8, time);
+      gain.gain.setValueAtTime(0.0001, time);
+      gain.gain.linearRampToValueAtTime(0.82, time + 0.035);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + 1.75);
+      roomGain.gain.setValueAtTime(0.24, time);
+      source.connect(filterNode).connect(gain);
+      gain.connect(dryBus);
+      gain.connect(roomGain).connect(roomSend);
+      source.start(time, 0, Math.min(1.8, lightFailureBuffer.duration));
+      source.onended = () => {
+        source.disconnect();
+        gain.disconnect();
+        filterNode.disconnect();
+        roomGain.disconnect();
+      };
+      return;
+    }
+
+    const whirr = context.createOscillator();
+    const whirrGain = context.createGain();
+    const whirrFilter = context.createBiquadFilter();
+    const sparkNoise = context.createBufferSource();
+    const sparkGain = context.createGain();
+    const sparkFilter = context.createBiquadFilter();
+
+    whirr.type = 'sawtooth';
+    whirr.frequency.setValueAtTime(162, time);
+    whirr.frequency.exponentialRampToValueAtTime(31, time + 1.45);
+    whirrFilter.type = 'lowpass';
+    whirrFilter.frequency.setValueAtTime(2200, time);
+    whirrFilter.frequency.exponentialRampToValueAtTime(260, time + 1.35);
+    whirrGain.gain.setValueAtTime(0.0001, time);
+    whirrGain.gain.linearRampToValueAtTime(0.13, time + 0.045);
+    whirrGain.gain.exponentialRampToValueAtTime(0.0001, time + 1.58);
+
+    sparkNoise.buffer = createElectricCrackleBuffer(context, 0.72);
+    sparkFilter.type = 'bandpass';
+    sparkFilter.frequency.setValueAtTime(4200, time);
+    sparkFilter.Q.setValueAtTime(5.5, time);
+    sparkGain.gain.setValueAtTime(0.0001, time);
+    sparkGain.gain.linearRampToValueAtTime(0.22, time + 0.025);
+    sparkGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.62);
+
+    whirr.connect(whirrFilter).connect(whirrGain);
+    whirrGain.connect(dryBus);
+    whirrGain.connect(roomSend);
+    sparkNoise.connect(sparkFilter).connect(sparkGain);
+    sparkGain.connect(dryBus);
+    sparkGain.connect(roomSend);
+    whirr.start(time);
+    whirr.stop(time + 1.65);
+    sparkNoise.start(time + 0.04);
+    sparkNoise.stop(time + 0.76);
+
+    const cleanup = () => {
+      whirr.disconnect();
+      whirrGain.disconnect();
+      whirrFilter.disconnect();
+      sparkNoise.disconnect();
+      sparkGain.disconnect();
+      sparkFilter.disconnect();
+    };
+    whirr.onended = cleanup;
+  };
+
   return {
     resume(): void {
       ensureContext();
@@ -1721,7 +1902,8 @@ function createHorrorAudio(): HorrorAudio {
     isSprinting: boolean,
     walker: HallwayWalkerSnapshot,
     playerPosition: THREE.Vector3,
-    listenerYaw: number
+    listenerYaw: number,
+    lightFailure: LightFailureCueState
   ): void {
       if (
         !context ||
@@ -1744,6 +1926,14 @@ function createHorrorAudio(): HorrorAudio {
       }
 
       const ambience = state.phase === 'escaped' ? 0 : ambienceLevel;
+      if (lightFailure.justTriggered) {
+        playLightFailureSound(context.currentTime + 0.01);
+      }
+
+      const blackout = state.currentAnomalyId === 'light-failure'
+        ? THREE.MathUtils.smoothstep(lightFailure.progress, 0, 1)
+        : 0;
+      const ambientMute = 1 - blackout * 0.88;
       const wobble = Math.sin(elapsedSeconds * 1.9) * 2.2;
       const flicker = Math.max(
         0,
@@ -1756,13 +1946,21 @@ function createHorrorAudio(): HorrorAudio {
         context.currentTime,
         0.06
       );
-      humGain.gain.setTargetAtTime(0.017 + ambience * 0.004, context.currentTime, 0.08);
-      droneGain.gain.setTargetAtTime(0.004 + ambience * 0.005, context.currentTime, 0.08);
-      buzzGain.gain.setTargetAtTime(0.0027 + ambience * 0.0007 + flicker * 0.0014, context.currentTime, 0.04);
-      flickerGain.gain.setTargetAtTime(0.001 + ambience * 0.00055 + flicker * 0.001, context.currentTime, 0.045);
-      filter.frequency.setTargetAtTime(360 + ambience * 56, context.currentTime, 0.12);
-      buzzFilter.frequency.setTargetAtTime(1800 + ambience * 120 + flicker * 380, context.currentTime, 0.05);
-      flickerFilter.frequency.setTargetAtTime(2600 + ambience * 140 + flicker * 500, context.currentTime, 0.05);
+      humGain.gain.setTargetAtTime((0.017 + ambience * 0.004) * ambientMute, context.currentTime, 0.08);
+      droneGain.gain.setTargetAtTime((0.004 + ambience * 0.005) * (1 - blackout * 0.32), context.currentTime, 0.08);
+      buzzGain.gain.setTargetAtTime(
+        (0.0027 + ambience * 0.0007 + flicker * 0.0014) * (1 - blackout * 0.96),
+        context.currentTime,
+        0.04
+      );
+      flickerGain.gain.setTargetAtTime(
+        (0.001 + ambience * 0.00055 + flicker * 0.001) * (1 - blackout * 0.9) + lightFailure.sparkPulse * 0.0016,
+        context.currentTime,
+        0.045
+      );
+      filter.frequency.setTargetAtTime(220 + (360 + ambience * 56) * ambientMute, context.currentTime, 0.12);
+      buzzFilter.frequency.setTargetAtTime(1800 + ambience * 120 + flicker * 380 + lightFailure.sparkPulse * 900, context.currentTime, 0.05);
+      flickerFilter.frequency.setTargetAtTime(2600 + ambience * 140 + flicker * 500 + lightFailure.sparkPulse * 1200, context.currentTime, 0.05);
       roomSend.gain.setTargetAtTime(0.34 + ambience * 0.035, context.currentTime, 0.12);
       roomReturn.gain.setTargetAtTime(0.48 + ambience * 0.025, context.currentTime, 0.12);
       footstepEchoReturn.gain.setTargetAtTime(0.2 + ambience * 0.018, context.currentTime, 0.1);
@@ -1798,6 +1996,8 @@ function createHorrorAudio(): HorrorAudio {
       roomReverb = null;
       recordedFootstepBuffer = null;
       recordedFootstepLoad = null;
+      lightFailureBuffer = null;
+      lightFailureLoad = null;
       nextFootstepTime = 0;
       lastWalkerFootstepId = 0;
       walkerFootstepIndex = 0;
@@ -1831,6 +2031,23 @@ function createLoopingNoiseBuffer(context: BaseAudioContext, seconds: number): A
   for (let index = 0; index < length; index += 1) {
     pink = pink * 0.86 + (Math.random() * 2 - 1) * 0.14;
     channel[index] = pink;
+  }
+
+  return buffer;
+}
+
+function createElectricCrackleBuffer(context: BaseAudioContext, seconds: number): AudioBuffer {
+  const length = Math.max(1, Math.floor(context.sampleRate * seconds));
+  const buffer = context.createBuffer(1, length, context.sampleRate);
+  const channel = buffer.getChannelData(0);
+  let burst = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    const progress = index / length;
+    const envelope = Math.pow(1 - progress, 2.1);
+    const trigger = Math.random() > 0.91 ? Math.random() * 2 - 1 : 0;
+    burst = burst * 0.42 + trigger * 0.58;
+    channel[index] = burst * envelope;
   }
 
   return buffer;

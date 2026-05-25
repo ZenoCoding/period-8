@@ -36,6 +36,9 @@ export interface HallwayHandles {
   ventDarkness: THREE.Mesh;
   flickerLight: THREE.RectAreaLight;
   flickerTubeMaterial: THREE.MeshStandardMaterial;
+  fluorescentLights: THREE.RectAreaLight[];
+  fluorescentTubeMaterials: THREE.MeshStandardMaterial[];
+  fluorescentSparkGroups: THREE.Group[];
   mismatchTile: THREE.Mesh;
   bulletinBoardTexture: THREE.CanvasTexture;
   hallwayFigure: THREE.Group;
@@ -43,7 +46,13 @@ export interface HallwayHandles {
   hallwayFigureFaceMaterial: THREE.MeshStandardMaterial;
   hallwayFigureHeadMaterial: THREE.MeshStandardMaterial;
   redFlood: THREE.Mesh;
-  redFloodMaterial: THREE.MeshStandardMaterial;
+  redFloodMaterial: THREE.MeshPhysicalMaterial;
+  redFloodFoam: THREE.Mesh;
+  redFloodFoamMaterial: THREE.MeshBasicMaterial;
+  redFloodWave: THREE.Mesh;
+  redFloodWaveMaterial: THREE.MeshBasicMaterial;
+  redFloodWake: THREE.Mesh;
+  redFloodWakeMaterial: THREE.MeshBasicMaterial;
   exitGlow: THREE.Mesh;
   transitionSigns: TransitionSignHandles;
   snapshots: Map<THREE.Object3D, TransformSnapshot>;
@@ -1028,7 +1037,7 @@ function createScuffTexture(width: number, height: number, strength: number): TH
 function addFluorescentLights(
   root: THREE.Group,
   options: FluorescentLightOptions
-): Pick<HallwayHandles, 'flickerLight' | 'flickerTubeMaterial'> {
+): Pick<HallwayHandles, 'flickerLight' | 'flickerTubeMaterial' | 'fluorescentLights' | 'fluorescentTubeMaterials' | 'fluorescentSparkGroups'> {
   const tubeMaterial = new THREE.MeshPhysicalMaterial({
     color: 0xf6fbff,
     emissive: 0xdbf0ff,
@@ -1049,6 +1058,10 @@ function addFluorescentLights(
   ];
 
   let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 0, 0.34, 1.78);
+  let flickerTubeMaterial = dimTubeMaterial;
+  const fluorescentLights: THREE.RectAreaLight[] = [];
+  const fluorescentTubeMaterials: THREE.MeshStandardMaterial[] = [];
+  const fluorescentSparkGroups: THREE.Group[] = [];
 
   for (const [index, spec] of lightSpecs.entries()) {
     const group = new THREE.Group();
@@ -1056,9 +1069,11 @@ function addFluorescentLights(
     group.position.set(spec.x, WALL_HEIGHT - 0.14, spec.z);
     group.rotation.y = spec.rotY;
 
-    const tube = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.035, 1.48), index === 2 ? dimTubeMaterial : tubeMaterial);
+    const tubeInstanceMaterial = (index === 2 ? dimTubeMaterial : tubeMaterial).clone();
+    const tube = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.035, 1.48), tubeInstanceMaterial);
     tube.name = 'fluorescent-tube';
     group.add(tube);
+    fluorescentTubeMaterials.push(tubeInstanceMaterial);
 
     const fixture = new THREE.Mesh(
       new THREE.BoxGeometry(0.3, 0.07, 1.78),
@@ -1078,9 +1093,11 @@ function addFluorescentLights(
     light.position.set(spec.x, WALL_HEIGHT - 0.26, spec.z);
     light.rotation.x = -Math.PI / 2;
     root.add(light);
+    fluorescentLights.push(light);
 
     if (index === 2) {
       flickerLight = light;
+      flickerTubeMaterial = tubeInstanceMaterial;
     }
 
     if (options.castShadows && (index === 0 || index === 2)) {
@@ -1100,12 +1117,53 @@ function addFluorescentLights(
     }
 
     root.add(group);
+    const sparks = addFluorescentSparks(root, spec.x, WALL_HEIGHT - 0.38, spec.z, spec.rotY, index);
+    fluorescentSparkGroups.push(sparks);
   }
 
   return {
     flickerLight,
-    flickerTubeMaterial: dimTubeMaterial
+    flickerTubeMaterial,
+    fluorescentLights,
+    fluorescentTubeMaterials,
+    fluorescentSparkGroups
   };
+}
+
+function addFluorescentSparks(
+  root: THREE.Group,
+  x: number,
+  y: number,
+  z: number,
+  rotationY: number,
+  lightIndex: number
+): THREE.Group {
+  const group = new THREE.Group();
+  group.name = `fluorescent-${lightIndex + 1}-sparks`;
+  group.position.set(x, y, z);
+  group.rotation.y = rotationY;
+  group.visible = false;
+  root.add(group);
+
+  for (let index = 0; index < 9; index += 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: index % 3 === 0 ? 0x8fe8ff : 0xffd38a,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+    const spark = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.001, 0.22 + (index % 3) * 0.06, 6), material);
+    spark.name = `spark-${index}`;
+    spark.userData.seed = lightIndex * 19 + index * 7;
+    group.add(spark);
+  }
+
+  const flash = new THREE.PointLight(0xffd69a, 0, 1.5, 2);
+  flash.name = 'spark-flash-light';
+  group.add(flash);
+
+  return group;
 }
 
 function addProps(
@@ -1118,6 +1176,9 @@ function addProps(
   | 'ambientLight'
   | 'flickerLight'
   | 'flickerTubeMaterial'
+  | 'fluorescentLights'
+  | 'fluorescentTubeMaterials'
+  | 'fluorescentSparkGroups'
   | 'snapshots'
 > {
   const lockerHandles = addLockers(root, snapshots);
@@ -1908,28 +1969,230 @@ function addHallwayFigure(
   };
 }
 
-function addRedFlood(root: THREE.Group): Pick<HallwayHandles, 'redFlood' | 'redFloodMaterial'> {
-  const redFloodMaterial = new THREE.MeshStandardMaterial({
-    color: 0x5a0604,
-    emissive: 0x240100,
-    emissiveIntensity: 0.22,
-    roughness: 0.18,
-    metalness: 0.04,
+function addRedFlood(root: THREE.Group): Pick<
+  HallwayHandles,
+  'redFlood' | 'redFloodMaterial' | 'redFloodFoam' | 'redFloodFoamMaterial' | 'redFloodWave' | 'redFloodWaveMaterial' | 'redFloodWake' | 'redFloodWakeMaterial'
+> {
+  const redFloodTexture = createRedFloodSurfaceTexture();
+  redFloodTexture.wrapS = THREE.RepeatWrapping;
+  redFloodTexture.wrapT = THREE.RepeatWrapping;
+  redFloodTexture.repeat.set(1.4, 5.6);
+  const redFloodMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0x6b0504,
+    map: redFloodTexture,
+    emissive: 0x250100,
+    emissiveIntensity: 0.26,
+    roughness: 0.12,
+    metalness: 0.01,
+    clearcoat: 1,
+    clearcoatRoughness: 0.05,
     transparent: true,
-    opacity: 0.78
+    opacity: 0.88
   });
   const redFlood = new THREE.Mesh(
-    new THREE.BoxGeometry(MAIN_HALF_WIDTH * 2 - 0.18, 0.045, 1),
+    new THREE.BoxGeometry(MAIN_HALF_WIDTH * 2 - 0.12, 0.07, 1),
     redFloodMaterial
   );
   redFlood.name = 'red-flood';
-  redFlood.position.set(0, 0.032, MAIN_HALF_LENGTH);
+  redFlood.position.set(0, 0.035, -MAIN_HALF_LENGTH);
   redFlood.scale.z = 0.05;
   redFlood.receiveShadow = true;
   redFlood.visible = false;
   root.add(redFlood);
 
-  return { redFlood, redFloodMaterial };
+  const redFloodFoamMaterial = new THREE.MeshBasicMaterial({
+    map: createRedFloodFoamTexture(),
+    color: 0xffd5c8,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide
+  });
+  const redFloodFoam = new THREE.Mesh(
+    new THREE.PlaneGeometry(MAIN_HALF_WIDTH * 2 + 0.18, 1.15, 36, 4),
+    redFloodFoamMaterial
+  );
+  redFloodFoam.name = 'red-flood-foam-crest';
+  redFloodFoam.rotation.x = -Math.PI / 2;
+  redFloodFoam.position.set(0, 0.095, -MAIN_HALF_LENGTH);
+  redFloodFoam.visible = false;
+  root.add(redFloodFoam);
+
+  const redFloodWaveMaterial = new THREE.MeshBasicMaterial({
+    map: createRedFloodWaveTexture(),
+    color: 0xff7a5f,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide
+  });
+  const redFloodWave = new THREE.Mesh(
+    new THREE.PlaneGeometry(MAIN_HALF_WIDTH * 2 + 0.42, 0.9, 32, 4),
+    redFloodWaveMaterial
+  );
+  redFloodWave.name = 'red-flood-breaking-wave';
+  redFloodWave.rotation.x = -Math.PI / 2.35;
+  redFloodWave.position.set(0, 0.18, -MAIN_HALF_LENGTH);
+  redFloodWave.visible = false;
+  root.add(redFloodWave);
+
+  const redFloodWakeMaterial = new THREE.MeshBasicMaterial({
+    map: createRedFloodFoamTexture(),
+    color: 0xd9b8aa,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide
+  });
+  const redFloodWake = new THREE.Mesh(
+    new THREE.PlaneGeometry(MAIN_HALF_WIDTH * 2 - 0.08, 4.4, 28, 8),
+    redFloodWakeMaterial
+  );
+  redFloodWake.name = 'red-flood-foam-wake';
+  redFloodWake.rotation.x = -Math.PI / 2;
+  redFloodWake.position.set(0, 0.105, -MAIN_HALF_LENGTH);
+  redFloodWake.visible = false;
+  root.add(redFloodWake);
+
+  return {
+    redFlood,
+    redFloodMaterial,
+    redFloodFoam,
+    redFloodFoamMaterial,
+    redFloodWave,
+    redFloodWaveMaterial,
+    redFloodWake,
+    redFloodWakeMaterial
+  };
+}
+
+function createRedFloodSurfaceTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 1024;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create red flood surface texture context.');
+  }
+
+  const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, '#300100');
+  gradient.addColorStop(0.38, '#7e0804');
+  gradient.addColorStop(0.7, '#420201');
+  gradient.addColorStop(1, '#190000');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let index = 0; index < 260; index += 1) {
+    const seed = index * 19.137;
+    const x = pseudoUnit(seed) * canvas.width;
+    const y = pseudoUnit(seed * 1.7) * canvas.height;
+    const w = 18 + pseudoUnit(seed * 2.3) * 160;
+    const h = 2 + pseudoUnit(seed * 3.1) * 22;
+    context.fillStyle = `rgba(${90 + index % 50}, ${pseudoUnit(seed) > 0.72 ? 18 : 3}, 2, ${0.035 + pseudoUnit(seed * 4.2) * 0.08})`;
+    context.beginPath();
+    context.ellipse(x, y, w, h, Math.sin(seed) * 0.35, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createRedFloodFoamTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create red flood foam texture context.');
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  for (let index = 0; index < 190; index += 1) {
+    const seed = index * 23.71;
+    const x = pseudoUnit(seed) * canvas.width;
+    const y = pseudoUnit(seed * 1.31) * canvas.height;
+    const radiusX = 8 + pseudoUnit(seed * 2.1) * 72;
+    const radiusY = 2 + pseudoUnit(seed * 3.4) * 18;
+    const alpha = 0.12 + pseudoUnit(seed * 5.2) * 0.42;
+    context.fillStyle = `rgba(255, ${185 + Math.round(pseudoUnit(seed) * 50)}, ${165 + Math.round(pseudoUnit(seed * 2) * 45)}, ${alpha})`;
+    context.beginPath();
+    context.ellipse(x, y, radiusX, radiusY, Math.sin(seed) * 0.4, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const fade = context.createLinearGradient(0, 0, 0, canvas.height);
+  fade.addColorStop(0, 'rgba(255,255,255,0)');
+  fade.addColorStop(0.38, 'rgba(255,255,255,0.9)');
+  fade.addColorStop(1, 'rgba(255,255,255,0)');
+  context.globalCompositeOperation = 'destination-in';
+  context.fillStyle = fade;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.globalCompositeOperation = 'source-over';
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createRedFloodWaveTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 384;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create red flood wave texture context.');
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  const body = context.createLinearGradient(0, 0, 0, canvas.height);
+  body.addColorStop(0, 'rgba(255, 210, 190, 0.8)');
+  body.addColorStop(0.18, 'rgba(160, 20, 12, 0.72)');
+  body.addColorStop(0.58, 'rgba(80, 4, 3, 0.58)');
+  body.addColorStop(1, 'rgba(20, 0, 0, 0)');
+  context.fillStyle = body;
+  context.beginPath();
+  context.moveTo(0, canvas.height * 0.35);
+  for (let x = 0; x <= canvas.width; x += 24) {
+    const y = canvas.height * (0.22 + Math.sin(x * 0.022) * 0.055 + Math.sin(x * 0.061) * 0.03);
+    context.lineTo(x, y);
+  }
+  context.lineTo(canvas.width, canvas.height);
+  context.lineTo(0, canvas.height);
+  context.closePath();
+  context.fill();
+
+  for (let index = 0; index < 90; index += 1) {
+    const seed = index * 41.13;
+    const x = pseudoUnit(seed) * canvas.width;
+    const y = canvas.height * (0.12 + pseudoUnit(seed * 2.8) * 0.3);
+    context.strokeStyle = `rgba(255, 225, 205, ${0.16 + pseudoUnit(seed) * 0.55})`;
+    context.lineWidth = 2 + pseudoUnit(seed * 1.9) * 8;
+    context.beginPath();
+    context.moveTo(x, y);
+    context.bezierCurveTo(x + 30, y - 26, x + 86, y + 28, x + 150, y + 8);
+    context.stroke();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function pseudoUnit(seed: number): number {
+  return ((Math.sin(seed) * 43758.5453) % 1 + 1) % 1;
 }
 
 function addLockers(

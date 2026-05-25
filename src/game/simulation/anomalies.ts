@@ -106,11 +106,11 @@ export const ANOMALIES: AnomalyDefinition[] = [
   },
   {
     id: 'red-flood',
-    label: 'Red flood behind you',
+    label: 'Red flood ahead',
     target: 'floor-threat',
     subtlety: 'obvious',
     normalState: 'The floor is dry.',
-    anomalousState: 'Red liquid spreads from the starting side of the hallway.',
+    anomalousState: 'Red liquid crashes in from the far end of the hallway.',
     timedThreatSeconds: 9.5
   }
 ];
