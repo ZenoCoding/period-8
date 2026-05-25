@@ -20,24 +20,24 @@ export interface SignCaptureResult {
   wall: 'xMin' | 'xMax' | 'zMin' | 'zMax';
 }
 
-const STORAGE_KEY = 'repetition.transitionTuning.v2';
+const STORAGE_KEY = 'repetition.transitionTuning.v4';
 const SIGN_WALL_OFFSET = 0.07;
 
 export const DEFAULT_TRANSITION_TUNING: TransitionTuning = {
   negative: {
     commitX: -6.85,
     commitZ: -10.15,
-    signX: -9.43,
-    signY: 1.62,
-    signZ: -13.1,
+    signX: -9.73,
+    signY: 1.7,
+    signZ: -17.25,
     signRotationY: Math.PI / 2
   },
   positive: {
     commitX: 6.85,
     commitZ: 10.15,
-    signX: 9.43,
-    signY: 1.62,
-    signZ: 13.1,
+    signX: 9.73,
+    signY: 1.7,
+    signZ: 17.25,
     signRotationY: -Math.PI / 2
   }
 };

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { AnomalyId } from '../../game/simulation/anomalies';
 import type { GameState } from '../../game/simulation/types';
 import type { HallwayHandles } from '../objects/hallway';
-import { restoreTransform } from '../objects/hallway';
+import { MAIN_HALF_LENGTH, restoreTransform, setBulletinBoardWarning } from '../objects/hallway';
 
 const SCHOOL_BACKGROUND = new THREE.Color(0xf7f9fb);
 const HORROR_BACKGROUND = new THREE.Color(0x050606);
@@ -61,6 +61,23 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
       handles.mismatchTile.visible = true;
       handles.mismatchTile.position.y = 0.036;
       break;
+    case 'bulletin-board':
+      setBulletinBoardWarning(handles, true);
+      break;
+    case 'man-staring':
+      break;
+    case 'man-face-missing':
+      handles.hallwayFigure.visible = true;
+      handles.hallwayFigureHeadMaterial.color.setHex(0xb8b3a9);
+      handles.hallwayFigureFaceMaterial.color.setHex(0x080808);
+      handles.hallwayFigureFaceMaterial.emissive.setHex(0x000000);
+      handles.hallwayFigureFaceMaterial.emissiveIntensity = 0;
+      handles.hallwayFigureHead.scale.set(1.08, 1.08, 1.08);
+      break;
+    case 'red-flood':
+      handles.redFlood.visible = true;
+      handles.redFloodMaterial.opacity = 0.78;
+      break;
   }
 }
 
@@ -68,7 +85,8 @@ export function updateAnomaly(
   handles: HallwayHandles,
   state: GameState,
   playerPosition: THREE.Vector3,
-  elapsedSeconds: number
+  elapsedSeconds: number,
+  timedThreatProgress = 0
 ): void {
   if (state.currentAnomalyId === 'camera-tracking') {
     handles.securityCameraHead.lookAt(playerPosition.x, playerPosition.y - 0.18, playerPosition.z);
@@ -82,6 +100,28 @@ export function updateAnomaly(
     const pulse = Math.max(0, Math.sin(elapsedSeconds * 28) * Math.sin(elapsedSeconds * 7.3));
     handles.flickerLight.intensity = 0.04 + pulse * 4.2;
     handles.flickerTubeMaterial.emissiveIntensity = 0.02 + pulse * 0.55;
+  }
+
+  if (state.currentAnomalyId === 'locker-ajar') {
+    const pulse = Math.sin(elapsedSeconds * 2.8) * 0.5 + 0.5;
+    handles.lockerDoor.rotation.y = -0.82 - pulse * 0.035;
+    handles.lockerInteriorMaterial.emissiveIntensity = 0.28 + pulse * 0.45;
+  }
+
+  if (state.currentAnomalyId === 'vent-open') {
+    const sway = Math.sin(elapsedSeconds * 1.9) * 0.018;
+    handles.ventCover.rotation.z = THREE.MathUtils.degToRad(4.5) + sway;
+    handles.ventDarkness.scale.setScalar(1.06 + Math.max(0, Math.sin(elapsedSeconds * 3.1)) * 0.08);
+  }
+
+  if (state.currentAnomalyId === 'man-face-missing') {
+    const tilt = Math.sin(elapsedSeconds * 0.82) * 0.05;
+    handles.hallwayFigureHead.rotation.x = tilt;
+    handles.hallwayFigure.rotation.y += Math.sin(elapsedSeconds * 1.2) * 0.0009;
+  }
+
+  if (state.currentAnomalyId === 'red-flood') {
+    updateRedFlood(handles, timedThreatProgress, elapsedSeconds);
   }
 }
 
@@ -121,6 +161,8 @@ function resetAnomalies(handles: HallwayHandles): void {
   restoreTransform(handles.clockMinutePivot, handles.snapshots);
   restoreTransform(handles.clockSecondPivot, handles.snapshots);
   restoreTransform(handles.securityCameraHead, handles.snapshots);
+  restoreTransform(handles.hallwayFigure, handles.snapshots);
+  restoreTransform(handles.hallwayFigureHead, handles.snapshots);
   restoreTransform(handles.ventCover, handles.snapshots);
 
   handles.lockerDoor.visible = false;
@@ -138,4 +180,24 @@ function resetAnomalies(handles: HallwayHandles): void {
   handles.flickerTubeMaterial.emissiveIntensity = 1.85;
   handles.mismatchTile.visible = false;
   handles.mismatchTile.position.y = 0.014;
+  setBulletinBoardWarning(handles, false);
+  handles.hallwayFigure.visible = false;
+  handles.hallwayFigureHeadMaterial.color.setHex(0xc99d7c);
+  handles.hallwayFigureFaceMaterial.color.setHex(0x17110f);
+  handles.hallwayFigureFaceMaterial.emissive.setHex(0x080302);
+  handles.hallwayFigureFaceMaterial.emissiveIntensity = 0.18;
+  handles.redFlood.visible = false;
+  handles.redFlood.scale.z = 0.05;
+  handles.redFlood.position.z = MAIN_HALF_LENGTH;
+  handles.redFloodMaterial.opacity = 0.78;
+  handles.redFloodMaterial.emissiveIntensity = 0.22;
+}
+
+function updateRedFlood(handles: HallwayHandles, progress: number, elapsedSeconds: number): void {
+  const eased = THREE.MathUtils.smoothstep(THREE.MathUtils.clamp(progress, 0, 1), 0, 1);
+  const depth = THREE.MathUtils.lerp(0.3, MAIN_HALF_LENGTH * 2 + 1.2, eased);
+  handles.redFlood.scale.z = depth;
+  handles.redFlood.position.z = MAIN_HALF_LENGTH - depth / 2;
+  handles.redFloodMaterial.opacity = 0.62 + eased * 0.26;
+  handles.redFloodMaterial.emissiveIntensity = 0.18 + eased * 0.72 + Math.max(0, Math.sin(elapsedSeconds * 12)) * 0.16;
 }

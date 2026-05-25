@@ -9,7 +9,7 @@ export function expectedActionForAnomaly(currentAnomalyId: GameState['currentAno
 }
 
 export function createInitialGameState(targetLoops = DEFAULT_TARGET_LOOPS): GameState {
-  const currentAnomalyId = pickEncounterForLoop(1, 0);
+  const currentAnomalyId = pickEncounterForLoop(1);
 
   return {
     loopIndex: 1,
@@ -107,5 +107,24 @@ export function resolvePortalTransition(state: GameState, choice: DirectionChoic
     wasCorrect,
     resetToStart: true,
     message: nextState.lastMessage
+  };
+}
+
+export function resolveTimedAnomalyTimeout(state: GameState): GameState {
+  const failCount = state.failCount + 1;
+  const ambienceLevel = Math.min(MAX_AMBIENCE_LEVEL, state.ambienceLevel + 1);
+  const currentAnomalyId = pickEncounterForLoop(1, failCount);
+
+  return {
+    ...state,
+    loopIndex: 1,
+    currentAnomalyId,
+    expectedAction: expectedActionForAnomaly(currentAnomalyId),
+    failCount,
+    ambienceLevel,
+    streak: 0,
+    phase: 'playing',
+    lastOutcome: 'wrong',
+    lastMessage: 'The hallway caught you.'
   };
 }

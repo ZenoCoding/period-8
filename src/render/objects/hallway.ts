@@ -37,6 +37,13 @@ export interface HallwayHandles {
   flickerLight: THREE.RectAreaLight;
   flickerTubeMaterial: THREE.MeshStandardMaterial;
   mismatchTile: THREE.Mesh;
+  bulletinBoardTexture: THREE.CanvasTexture;
+  hallwayFigure: THREE.Group;
+  hallwayFigureHead: THREE.Object3D;
+  hallwayFigureFaceMaterial: THREE.MeshStandardMaterial;
+  hallwayFigureHeadMaterial: THREE.MeshStandardMaterial;
+  redFlood: THREE.Mesh;
+  redFloodMaterial: THREE.MeshStandardMaterial;
   exitGlow: THREE.Mesh;
   transitionSigns: TransitionSignHandles;
   snapshots: Map<THREE.Object3D, TransformSnapshot>;
@@ -84,7 +91,7 @@ export type TransitionSignOutcome = 'idle' | 'correct' | 'wrong';
 
 export interface TransitionSignHandle {
   root: THREE.Group;
-  texture: THREE.CanvasTexture;
+  numberTexture: THREE.CanvasTexture;
 }
 
 export interface TransitionSignHandles {
@@ -163,10 +170,19 @@ const POSITIVE_WALL_FACE_X = MAIN_HALF_WIDTH - 0.015;
 const NEGATIVE_WALL_FACE_X = -MAIN_HALF_WIDTH + 0.015;
 const TEXTURE_ROOT = '/textures/ambientcg';
 const MODEL_ROOT = '/models/hallway';
+const TRANSITION_CHALKBOARD_TEXTURE = '/textures/transition-chalkboard.png';
+const TRANSITION_CHALK_FONT_URL = '/fonts/CabinSketch-Bold.ttf';
+const TRANSITION_CHALK_FONT_FAMILY = 'Cabin Sketch Repetition';
+const TRANSITION_SIGN_WIDTH = 1.48;
+const TRANSITION_SIGN_HEIGHT = 0.95;
+const TRANSITION_SIGN_CANVAS_WIDTH = 1566;
+const TRANSITION_SIGN_CANVAS_HEIGHT = 1004;
 const textureLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
 const textureCache = new Map<string, THREE.Texture>();
 const modelCache = new Map<string, Promise<THREE.Group>>();
+let chalkNumberFontLoaded = false;
+let chalkNumberFontPromise: Promise<void> | null = null;
 
 interface ShellOptions {
   walkableRects: BoundsRect[];
@@ -216,6 +232,21 @@ function loadTexture(path: string, isColor: boolean): THREE.Texture {
   const texture = textureLoader.load(path);
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 4;
+  texture.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  textureCache.set(path, texture);
+  return texture;
+}
+
+function loadFlatTexture(path: string, isColor: boolean): THREE.Texture {
+  const cached = textureCache.get(path);
+  if (cached) {
+    return cached;
+  }
+
+  const texture = textureLoader.load(path);
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.anisotropy = 4;
   texture.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   textureCache.set(path, texture);
@@ -430,7 +461,7 @@ export function setTransitionSign(
   isEscaped: boolean,
   outcome: TransitionSignOutcome = 'idle'
 ): void {
-  paintLevelSign(getTransitionSign(handles, side).texture, level, targetLoops, isEscaped, outcome);
+  paintLevelSignNumber(getTransitionSign(handles, side).numberTexture, level, targetLoops, isEscaped, outcome);
 }
 
 export function setTransitionSignVisible(handles: HallwayHandles, visibleSide: TransitionSignSide | null): void {
@@ -447,6 +478,10 @@ export function setTransitionSignTransform(
   const sign = getTransitionSign(handles, side).root;
   sign.position.copy(position);
   sign.rotation.y = rotationY;
+}
+
+export function setBulletinBoardWarning(handles: HallwayHandles, isWarning: boolean): void {
+  paintBulletinBoardTexture(handles.bulletinBoardTexture, isWarning);
 }
 
 function getTransitionSign(handles: HallwayHandles, side: TransitionSignSide): TransitionSignHandle {
@@ -1090,6 +1125,9 @@ function addProps(
   const cameraHandles = addSecurityCamera(root, snapshots);
   const ventHandles = addVent(root, snapshots);
   const anomalyTile = addMismatchTile(root);
+  const bulletinBoardHandles = addBulletinBoard(root);
+  const hallwayFigureHandles = addHallwayFigure(root, snapshots);
+  const redFloodHandles = addRedFlood(root);
   const exitGlow = addExitGlow(root);
   const negativeTransitionSign = addLevelSign(root, {
     name: 'negative-transition-level-sign',
@@ -1109,6 +1147,9 @@ function addProps(
     ...clockHandles,
     ...cameraHandles,
     ...ventHandles,
+    ...bulletinBoardHandles,
+    ...hallwayFigureHandles,
+    ...redFloodHandles,
     mismatchTile: anomalyTile,
     exitGlow,
     transitionSigns: {
@@ -1119,7 +1160,7 @@ function addProps(
 }
 
 function getTransitionSignPosition(side: TransitionSignSide): THREE.Vector3 {
-  return new THREE.Vector3(side * 14.57, 1.62, side * 20.1);
+  return new THREE.Vector3(side * 9.73, 1.7, side * 17.25);
 }
 
 function getTransitionSignRotation(side: TransitionSignSide): number {
@@ -1379,17 +1420,19 @@ interface LevelSignOptions {
 }
 
 function addLevelSign(root: THREE.Group, options: LevelSignOptions): TransitionSignHandle {
-  const texture = createLevelSignTexture();
+  const boardTexture = loadFlatTexture(TRANSITION_CHALKBOARD_TEXTURE, true);
+  const numberTexture = createLevelSignNumberTexture();
   const signMaterial = new THREE.MeshStandardMaterial({
-    map: texture,
-    roughness: 0.58,
-    metalness: 0.04,
+    map: boardTexture,
+    roughness: 0.72,
+    metalness: 0,
     side: THREE.DoubleSide
   });
-  const frameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x4b514e,
-    roughness: 0.5,
-    metalness: 0.18
+  const numberMaterial = new THREE.MeshBasicMaterial({
+    map: numberTexture,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
   });
 
   const sign = new THREE.Group();
@@ -1399,35 +1442,34 @@ function addLevelSign(root: THREE.Group, options: LevelSignOptions): TransitionS
   sign.visible = false;
   root.add(sign);
 
-  const board = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.86), signMaterial);
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(TRANSITION_SIGN_WIDTH, TRANSITION_SIGN_HEIGHT), signMaterial);
   board.name = `${options.name}-face`;
   board.position.z = 0.022;
   sign.add(board);
 
-  addRectangularFrame(sign, `${options.name}-frame`, {
-    outerWidth: 1.32,
-    outerHeight: 0.98,
-    thickness: 0.055,
-    depth: 0.035,
-    bottom: -0.49,
-    z: 0,
-    material: frameMaterial
-  });
+  const numberOverlay = new THREE.Mesh(new THREE.PlaneGeometry(TRANSITION_SIGN_WIDTH, TRANSITION_SIGN_HEIGHT), numberMaterial);
+  numberOverlay.name = `${options.name}-period-number`;
+  numberOverlay.position.z = 0.024;
+  numberOverlay.renderOrder = 2;
+  sign.add(numberOverlay);
 
-  return { root: sign, texture };
+  addBox(sign, `${options.name}-backing`, [TRANSITION_SIGN_WIDTH + 0.04, TRANSITION_SIGN_HEIGHT + 0.04, 0.025], [0, 0, 0], signMaterial);
+
+  return { root: sign, numberTexture };
 }
 
-function createLevelSignTexture(): THREE.CanvasTexture {
+function createLevelSignNumberTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 768;
-  canvas.height = 512;
+  canvas.width = TRANSITION_SIGN_CANVAS_WIDTH;
+  canvas.height = TRANSITION_SIGN_CANVAS_HEIGHT;
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  paintLevelSign(texture, 1, 8, false, 'idle');
+  ensureChalkNumberFontLoaded(() => paintLevelSignNumber(texture, 1, 8, false, 'idle'));
+  paintLevelSignNumber(texture, 1, 8, false, 'idle');
   return texture;
 }
 
-function paintLevelSign(
+function paintLevelSignNumber(
   texture: THREE.CanvasTexture,
   level: number,
   targetLoops: number,
@@ -1440,50 +1482,140 @@ function paintLevelSign(
     throw new Error('Could not create level sign canvas context.');
   }
 
-  const count = THREE.MathUtils.clamp(level, 1, targetLoops);
-  const status = getTransitionSignStatus(outcome, isEscaped);
+  const count = isEscaped ? targetLoops : THREE.MathUtils.clamp(level, 1, targetLoops);
+  const color = outcome === 'wrong' ? '219, 205, 194' : '224, 221, 205';
+  const seed = count * 97 + targetLoops * 13 + (outcome === 'wrong' ? 19 : 0);
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = outcome === 'wrong' ? '#efe6df' : '#f3f0df';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.strokeStyle = outcome === 'wrong' ? '#351b17' : '#222927';
-  context.lineWidth = 22;
-  context.strokeRect(22, 22, canvas.width - 44, canvas.height - 44);
-  context.strokeStyle = outcome === 'wrong' ? '#b86b5e' : '#b7ad8f';
-  context.lineWidth = 4;
-  context.strokeRect(48, 48, canvas.width - 96, canvas.height - 96);
-
-  context.fillStyle = outcome === 'wrong' ? '#3a1512' : '#171c1b';
+  context.save();
+  context.font = getChalkNumberFont(560);
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  context.font = '700 58px Arial, sans-serif';
-  context.fillText('IF YOU SEE AN ANOMALY', canvas.width / 2, 110);
-  context.fillText('TURN BACK', canvas.width / 2, 172);
-  context.font = '700 52px Arial, sans-serif';
-  context.fillText('IF NOT, KEEP GOING', canvas.width / 2, 248);
-  context.font = '800 94px Arial, sans-serif';
-  context.fillText(status, canvas.width / 2, 348);
-  context.font = '800 70px Arial, sans-serif';
-  context.fillText(isEscaped ? 'EXIT' : `LEVEL ${count}`, canvas.width / 2, 420);
-  context.font = '700 34px Arial, sans-serif';
-  context.fillText(isEscaped ? 'THE REPETITION BREAKS' : `${count} / ${targetLoops}`, canvas.width / 2, 466);
+  const number = String(count);
+  const centerX = canvas.width * 0.715;
+  const centerY = canvas.height * 0.35;
+  const random = seededRandom(seed);
+
+  context.shadowColor = `rgba(${color}, 0.32)`;
+  context.shadowBlur = 15;
+  for (let pass = 0; pass < 10; pass += 1) {
+    const dx = Math.round((random() - 0.5) * 9);
+    const dy = Math.round((random() - 0.5) * 7);
+    context.fillStyle = `rgba(${color}, ${0.08 + random() * 0.045})`;
+    context.fillText(number, centerX + dx, centerY + dy);
+  }
+
+  context.shadowBlur = 0;
+  context.fillStyle = `rgba(${color}, 0.9)`;
+  context.fillText(number, centerX, centerY);
+  context.restore();
+
+  distressChalkNumber(context, number, centerX, centerY, seed);
+  smudgeChalkNumber(context, centerX, centerY, seed);
 
   texture.needsUpdate = true;
+
+  if (!chalkNumberFontLoaded) {
+    ensureChalkNumberFontLoaded(() => paintLevelSignNumber(texture, level, targetLoops, isEscaped, outcome));
+  }
 }
 
-function getTransitionSignStatus(outcome: TransitionSignOutcome, isEscaped: boolean): string {
-  if (isEscaped) {
-    return 'SUCCESS';
+function getChalkNumberFont(size: number): string {
+  const primaryFont = chalkNumberFontLoaded ? `"${TRANSITION_CHALK_FONT_FAMILY}"` : 'Arial Black';
+  return `700 ${size}px ${primaryFont}, sans-serif`;
+}
+
+function ensureChalkNumberFontLoaded(onLoaded?: () => void): void {
+  if (chalkNumberFontLoaded) {
+    onLoaded?.();
+    return;
   }
 
-  if (outcome === 'wrong') {
-    return 'ERROR';
+  if (typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts) {
+    return;
   }
 
-  if (outcome === 'correct') {
-    return 'SUCCESS';
+  if (!chalkNumberFontPromise) {
+    const fontFace = new FontFace(
+      TRANSITION_CHALK_FONT_FAMILY,
+      `url("${TRANSITION_CHALK_FONT_URL}") format("truetype")`
+    );
+    chalkNumberFontPromise = fontFace.load().then((loadedFontFace) => {
+      document.fonts.add(loadedFontFace);
+      chalkNumberFontLoaded = true;
+    });
   }
 
-  return 'READY';
+  if (onLoaded) {
+    chalkNumberFontPromise.then(onLoaded).catch(() => undefined);
+  }
+}
+
+function distressChalkNumber(
+  context: CanvasRenderingContext2D,
+  number: string,
+  centerX: number,
+  centerY: number,
+  seed: number
+): void {
+  const metrics = context.measureText(number);
+  const width = Math.ceil(metrics.width + 90);
+  const height = Math.ceil((metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent || 560) + 110);
+  const x = Math.max(0, Math.floor(centerX - width / 2));
+  const y = Math.max(0, Math.floor(centerY - height / 2));
+  const clippedWidth = Math.min(width, context.canvas.width - x);
+  const clippedHeight = Math.min(height, context.canvas.height - y);
+  const imageData = context.getImageData(x, y, clippedWidth, clippedHeight);
+  const data = imageData.data;
+  const random = seededRandom(seed + 1009);
+
+  for (let index = 3; index < data.length; index += 4) {
+    const alpha = data[index];
+    if (alpha === 0) {
+      continue;
+    }
+
+    const roll = random();
+    if (roll < 0.1) {
+      data[index] = Math.round(alpha * (0.2 + random() * 0.35));
+    } else if (roll < 0.22) {
+      data[index] = Math.round(alpha * (0.58 + random() * 0.22));
+    }
+  }
+
+  context.putImageData(imageData, x, y);
+}
+
+function smudgeChalkNumber(context: CanvasRenderingContext2D, centerX: number, centerY: number, seed: number): void {
+  const random = seededRandom(seed + 4099);
+  context.save();
+  context.globalCompositeOperation = 'destination-out';
+  context.filter = 'blur(8px)';
+  context.lineCap = 'round';
+
+  for (let smear = 0; smear < 2; smear += 1) {
+    context.beginPath();
+    const y = centerY + (smear === 0 ? 70 : 165) + (random() - 0.5) * 26;
+    const startX = centerX - 210 + random() * 28;
+    context.moveTo(startX, y);
+    for (let point = 1; point <= 7; point += 1) {
+      const x = startX + point * 58 + (random() - 0.5) * 24;
+      const curveY = y + Math.sin(point * 0.9 + seed) * 9 + (random() - 0.5) * 10;
+      context.lineTo(x, curveY);
+    }
+    context.strokeStyle = `rgba(0, 0, 0, ${smear === 0 ? 0.18 : 0.13})`;
+    context.lineWidth = smear === 0 ? 42 : 30;
+    context.stroke();
+  }
+
+  context.restore();
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
 }
 
 function addMotivationalPoster(root: THREE.Group): void {
@@ -1519,6 +1651,285 @@ function addMotivationalPoster(root: THREE.Group): void {
     z: 0,
     material: frameMaterial
   });
+}
+
+function addBulletinBoard(root: THREE.Group): Pick<HallwayHandles, 'bulletinBoardTexture'> {
+  const bulletinBoardTexture = createBulletinBoardTexture(false);
+  const corkMaterial = new THREE.MeshStandardMaterial({
+    map: bulletinBoardTexture,
+    roughness: 0.82,
+    metalness: 0.01
+  });
+  const frameMaterial = createWoodMaterial(0x9f7447);
+  const glassMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0xf8ffff,
+    roughness: 0.08,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.16,
+    transmission: 0.12,
+    clearcoat: 0.7,
+    clearcoatRoughness: 0.16
+  });
+
+  const board = new THREE.Group();
+  board.name = 'bulletin-board';
+  board.position.set(NEGATIVE_WALL_FACE_X, 1.44, -6.2);
+  board.rotation.y = Math.PI / 2;
+  root.add(board);
+
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(1.46, 0.92), corkMaterial);
+  face.name = 'bulletin-board-face';
+  face.position.z = 0.019;
+  board.add(face);
+
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.42, 0.88), glassMaterial);
+  glass.name = 'bulletin-board-glass';
+  glass.position.z = 0.026;
+  board.add(glass);
+
+  addRectangularFrame(board, 'bulletin-board-frame', {
+    outerWidth: 1.58,
+    outerHeight: 1.04,
+    thickness: 0.055,
+    depth: 0.038,
+    bottom: -0.52,
+    z: 0,
+    material: frameMaterial
+  });
+
+  return { bulletinBoardTexture };
+}
+
+function createBulletinBoardTexture(isWarning: boolean): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 640;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  paintBulletinBoardTexture(texture, isWarning);
+  return texture;
+}
+
+function paintBulletinBoardTexture(texture: THREE.CanvasTexture, isWarning: boolean): void {
+  const canvas = texture.image as HTMLCanvasElement;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create bulletin board canvas context.');
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = isWarning ? '#6f2720' : '#b9854f';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.globalAlpha = isWarning ? 0.32 : 0.18;
+  context.strokeStyle = isWarning ? '#210807' : '#6d4729';
+  context.lineWidth = 3;
+  for (let y = 18; y < canvas.height; y += 42) {
+    context.beginPath();
+    context.moveTo(0, y + Math.sin(y) * 8);
+    context.lineTo(canvas.width, y + Math.cos(y) * 8);
+    context.stroke();
+  }
+  context.globalAlpha = 1;
+
+  const notes = [
+    { x: 76, y: 58, w: 252, h: 174, color: '#f5efd8', rot: -0.05 },
+    { x: 382, y: 62, w: 216, h: 240, color: '#d9e8f5', rot: 0.04 },
+    { x: 662, y: 74, w: 250, h: 162, color: '#f7e2d0', rot: -0.035 },
+    { x: 116, y: 312, w: 304, h: 206, color: '#e8efd4', rot: 0.035 },
+    { x: 524, y: 352, w: 356, h: 164, color: '#f5f0cc', rot: -0.025 }
+  ];
+
+  for (const [index, note] of notes.entries()) {
+    drawBulletinNote(context, note.x, note.y, note.w, note.h, note.color, note.rot, index, isWarning);
+  }
+
+  if (isWarning) {
+    context.fillStyle = 'rgba(44, 5, 3, 0.82)';
+    context.font = '900 86px Arial, sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText('TURN BACK', canvas.width / 2, canvas.height / 2 + 8);
+  }
+
+  texture.needsUpdate = true;
+}
+
+function drawBulletinNote(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  color: string,
+  rotation: number,
+  index: number,
+  isWarning: boolean
+): void {
+  context.save();
+  context.translate(x + width / 2, y + height / 2);
+  context.rotate(rotation);
+  context.fillStyle = color;
+  context.fillRect(-width / 2, -height / 2, width, height);
+  context.strokeStyle = 'rgba(42, 38, 31, 0.26)';
+  context.lineWidth = 5;
+  context.strokeRect(-width / 2, -height / 2, width, height);
+
+  context.fillStyle = isWarning ? '#3a0805' : '#27313b';
+  context.textAlign = 'left';
+  context.textBaseline = 'top';
+  context.font = `800 ${isWarning ? 34 : 28}px Arial, sans-serif`;
+  const headline = isWarning ? 'TURN BACK' : ['TRYOUTS', 'MATH CLUB', 'LOST KEYS', 'CAFETERIA', 'FIELD TRIP'][index];
+  context.fillText(headline, -width / 2 + 24, -height / 2 + 22);
+
+  context.lineWidth = isWarning ? 7 : 4;
+  context.strokeStyle = isWarning ? 'rgba(58, 8, 5, 0.78)' : 'rgba(39, 49, 59, 0.42)';
+  const lineCount = isWarning ? 4 : 5;
+  for (let line = 0; line < lineCount; line += 1) {
+    const lineY = -height / 2 + 78 + line * 28;
+    context.beginPath();
+    context.moveTo(-width / 2 + 24, lineY);
+    context.lineTo(width / 2 - 24 - (line % 2) * 36, lineY);
+    context.stroke();
+  }
+
+  context.fillStyle = isWarning ? '#16110d' : '#b5221f';
+  context.beginPath();
+  context.arc(0, -height / 2 + 14, 9, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+}
+
+function addHallwayFigure(
+  root: THREE.Group,
+  snapshots: Map<THREE.Object3D, TransformSnapshot>
+): Pick<
+  HallwayHandles,
+  'hallwayFigure' | 'hallwayFigureHead' | 'hallwayFigureFaceMaterial' | 'hallwayFigureHeadMaterial'
+> {
+  const figure = new THREE.Group();
+  figure.name = 'hallway-figure';
+  figure.position.set(MAIN_HALF_WIDTH - 0.64, 0, -7.4);
+  figure.rotation.y = -2.72;
+  figure.visible = false;
+  root.add(figure);
+
+  const suitMaterial = new THREE.MeshStandardMaterial({
+    color: 0x22282d,
+    roughness: 0.78,
+    metalness: 0.02
+  });
+  const shirtMaterial = new THREE.MeshStandardMaterial({
+    color: 0xcbd3d6,
+    roughness: 0.72,
+    metalness: 0.01
+  });
+  const collarMaterial = new THREE.MeshStandardMaterial({
+    color: 0x080909,
+    emissive: 0x020202,
+    emissiveIntensity: 0.1,
+    roughness: 0.9,
+    metalness: 0.02
+  });
+  const hallwayFigureHeadMaterial = new THREE.MeshStandardMaterial({
+    color: 0xc99d7c,
+    roughness: 0.64,
+    metalness: 0.01
+  });
+  const hallwayFigureFaceMaterial = new THREE.MeshStandardMaterial({
+    color: 0x17110f,
+    emissive: 0x080302,
+    emissiveIntensity: 0.18,
+    roughness: 0.82,
+    metalness: 0,
+    side: THREE.DoubleSide
+  });
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.74, 5, 12), suitMaterial);
+  torso.name = 'hallway-figure-torso';
+  torso.position.y = 0.98;
+  torso.scale.set(0.82, 1, 0.62);
+  torso.castShadow = true;
+  figure.add(torso);
+
+  const shirt = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.56, 0.035), shirtMaterial);
+  shirt.name = 'hallway-figure-shirt';
+  shirt.position.set(0, 1.12, -0.19);
+  shirt.castShadow = true;
+  figure.add(shirt);
+
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.055, 20), collarMaterial);
+  collar.name = 'hallway-figure-empty-collar';
+  collar.position.set(0, 1.48, -0.01);
+  collar.scale.z = 0.72;
+  collar.castShadow = true;
+  figure.add(collar);
+
+  for (const side of [-1, 1] as const) {
+    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.56, 4, 8), suitMaterial);
+    arm.name = `hallway-figure-arm-${side}`;
+    arm.position.set(side * 0.28, 1.02, -0.03);
+    arm.rotation.z = side * 0.16;
+    arm.castShadow = true;
+    figure.add(arm);
+
+    const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.065, 0.68, 4, 8), suitMaterial);
+    leg.name = `hallway-figure-leg-${side}`;
+    leg.position.set(side * 0.09, 0.42, 0);
+    leg.castShadow = true;
+    figure.add(leg);
+  }
+
+  const headPivot = new THREE.Group();
+  headPivot.name = 'hallway-figure-head-pivot';
+  headPivot.position.set(0, 1.57, -0.02);
+  figure.add(headPivot);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 24, 16), hallwayFigureHeadMaterial);
+  head.name = 'hallway-figure-head';
+  head.scale.set(0.86, 1.02, 0.78);
+  head.castShadow = true;
+  headPivot.add(head);
+
+  const face = new THREE.Mesh(new THREE.CircleGeometry(0.105, 24), hallwayFigureFaceMaterial);
+  face.name = 'hallway-figure-face-shadow';
+  face.position.set(0, -0.006, -0.128);
+  face.scale.set(0.74, 1.05, 1);
+  headPivot.add(face);
+
+  snapshotTransform(figure, snapshots);
+  snapshotTransform(headPivot, snapshots);
+
+  return {
+    hallwayFigure: figure,
+    hallwayFigureHead: headPivot,
+    hallwayFigureFaceMaterial,
+    hallwayFigureHeadMaterial
+  };
+}
+
+function addRedFlood(root: THREE.Group): Pick<HallwayHandles, 'redFlood' | 'redFloodMaterial'> {
+  const redFloodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x5a0604,
+    emissive: 0x240100,
+    emissiveIntensity: 0.22,
+    roughness: 0.18,
+    metalness: 0.04,
+    transparent: true,
+    opacity: 0.78
+  });
+  const redFlood = new THREE.Mesh(
+    new THREE.BoxGeometry(MAIN_HALF_WIDTH * 2 - 0.18, 0.045, 1),
+    redFloodMaterial
+  );
+  redFlood.name = 'red-flood';
+  redFlood.position.set(0, 0.032, MAIN_HALF_LENGTH);
+  redFlood.scale.z = 0.05;
+  redFlood.receiveShadow = true;
+  redFlood.visible = false;
+  root.add(redFlood);
+
+  return { redFlood, redFloodMaterial };
 }
 
 function addLockers(

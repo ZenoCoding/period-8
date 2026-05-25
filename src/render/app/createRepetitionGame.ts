@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { applyKeyChange, createInputState } from '../../game/input/actions';
-import { createInitialGameState } from '../../game/simulation/gameState';
+import { ANOMALY_BY_ID } from '../../game/simulation/anomalies';
+import { createInitialGameState, resolveTimedAnomalyTimeout } from '../../game/simulation/gameState';
 import type { GameState } from '../../game/simulation/types';
 import { createHud, renderHud } from '../../ui/hud';
 import { applyAnomaly, updateAnomaly, updateAtmosphere } from '../adapters/anomalyRenderer';
@@ -181,6 +182,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let lastVisualAnomalyId: GameState['currentAnomalyId'] = state.currentAnomalyId;
   let activeElapsedSeconds = 0;
   let smoothedAmbienceLevel = state.ambienceLevel;
+  let activeTimedAnomalyId: GameState['currentAnomalyId'] = null;
+  let timedThreatElapsed = 0;
   let playerMoveSpeed = 0;
   const clock = new THREE.Clock();
   const playerPosition = NEGATIVE_HALLWAY_START.clone();
@@ -315,7 +318,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       playerMoveSpeed = 0;
     }
 
-    updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds);
+    const timedThreatProgress = updateTimedThreat(deltaSeconds);
+    updateAnomaly(hallway, currentHallwayState, playerPosition, elapsedSeconds, timedThreatProgress);
     if (nextHallway) {
       updateAnomaly(nextHallway.handles, nextHallway.state, playerPosition, elapsedSeconds);
     }
@@ -324,6 +328,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     if (nextHallway) {
       updateAtmosphere(scene, nextHallway.handles, state, visibleAmbienceLevel);
     }
+    hallwayWalker.setHeadTracking(currentHallwayState.currentAnomalyId === 'man-staring', playerPosition, elapsedSeconds);
     hallwayWalker.update(deltaSeconds);
     hud.setDebugVisible(input.debug);
     if (input.debug) {
@@ -686,11 +691,35 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     const local = worldToHallwayLocal(hallway, playerPosition);
     const side = activeTransition?.side ?? getNearestTransitionSide(local.x, local.z);
     const queuedLocal = nextHallway ? worldToHallwayLocal(nextHallway.handles, playerPosition) : null;
+    const ruleAnomaly = state.currentAnomalyId
+      ? ANOMALY_BY_ID.get(state.currentAnomalyId)
+      : null;
+    const visualAnomaly = currentHallwayState.currentAnomalyId
+      ? ANOMALY_BY_ID.get(currentHallwayState.currentAnomalyId)
+      : null;
+    const queuedAnomaly = nextHallway?.state.currentAnomalyId
+      ? ANOMALY_BY_ID.get(nextHallway.state.currentAnomalyId)
+      : null;
     hud.debug.textContent = [
       `Position: x ${formatNumber(local.x)} z ${formatNumber(local.z)} yaw ${formatNumber(yaw)}`,
       queuedLocal ? `Queued local: x ${formatNumber(queuedLocal.x)} z ${formatNumber(queuedLocal.z)}` : 'Queued local: none',
       `Transition: ${transitionPhase} side ${formatSide(side)}`,
       `Level: ${state.loopIndex}/${state.targetLoops} outcome ${state.lastOutcome}`,
+      state.currentAnomalyId
+        ? `Rule anomaly: ${ruleAnomaly?.label ?? state.currentAnomalyId} (${state.currentAnomalyId})`
+        : 'Rule anomaly: none',
+      currentHallwayState.currentAnomalyId
+        ? `Visual anomaly: ${visualAnomaly?.label ?? currentHallwayState.currentAnomalyId} (${currentHallwayState.currentAnomalyId})`
+        : 'Visual anomaly: none',
+      nextHallway?.state.currentAnomalyId
+        ? `Queued anomaly: ${queuedAnomaly?.label ?? nextHallway.state.currentAnomalyId} (${nextHallway.state.currentAnomalyId})`
+        : 'Queued anomaly: none',
+      ruleAnomaly
+        ? `Target: ${ruleAnomaly.target} subtlety ${ruleAnomaly.subtlety}`
+        : '',
+      activeTimedAnomalyId
+        ? `Timed threat: ${formatNumber(getTimedThreatProgress() * 100)}% (${formatNumber(timedThreatElapsed)}s)`
+        : '',
       formatTransitionTuning(transitionTuning),
       'Debug tuning: C commit, V sign, R reset',
       debugNotice ? `Last: ${debugNotice}` : ''
@@ -728,6 +757,70 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     }
 
     return smoothedAmbienceLevel;
+  }
+
+  function updateTimedThreat(deltaSeconds: number): number {
+    const anomalyId = currentHallwayState.currentAnomalyId;
+    const anomaly = anomalyId ? ANOMALY_BY_ID.get(anomalyId) : null;
+    const limit = anomaly?.timedThreatSeconds;
+    const hasCommittedPortal =
+      activeTransition?.phase === 'committed' || activeTransition?.phase === 'postCommit';
+
+    if (!limit || state.phase !== 'playing' || hasCommittedPortal) {
+      activeTimedAnomalyId = null;
+      timedThreatElapsed = 0;
+      return 0;
+    }
+
+    if (activeTimedAnomalyId !== anomalyId) {
+      activeTimedAnomalyId = anomalyId;
+      timedThreatElapsed = 0;
+    }
+
+    timedThreatElapsed += deltaSeconds;
+    const progress = THREE.MathUtils.clamp(timedThreatElapsed / limit, 0, 1);
+
+    if (progress >= 1) {
+      resetFromTimedThreat();
+      return 0;
+    }
+
+    return progress;
+  }
+
+  function getTimedThreatProgress(): number {
+    const anomaly = activeTimedAnomalyId ? ANOMALY_BY_ID.get(activeTimedAnomalyId) : null;
+    return anomaly?.timedThreatSeconds
+      ? THREE.MathUtils.clamp(timedThreatElapsed / anomaly.timedThreatSeconds, 0, 1)
+      : 0;
+  }
+
+  function resetFromTimedThreat(): void {
+    state = resolveTimedAnomalyTimeout(state);
+    currentHallwayState = state;
+    playerPosition.copy(NEGATIVE_HALLWAY_START);
+    yaw = 0;
+    pitch = 0;
+    activeTransition = null;
+    transitionPhase = 'observing';
+    suppressedExitSide = null;
+    transitionCooldown = 0.4;
+    activeTimedAnomalyId = null;
+    timedThreatElapsed = 0;
+
+    if (nextHallway) {
+      hideHallwayCell(nextHallway);
+      nextHallway = null;
+    }
+
+    configureHallwayForState({ handles: hallway, state: currentHallwayState, walkableRects: WALKABLE_RECTS }, state);
+    hallway.root.position.set(0, 0, 0);
+    hallway.root.rotation.set(0, 0, 0);
+    hallway.root.updateMatrixWorld(true);
+    resetTransitionSigns(state.loopIndex, 'wrong');
+    renderHud(hud, state);
+    hud.flashPortal();
+    pulseScreenDistortion(1.24);
   }
 
   function updateScreenTreatment(deltaSeconds: number, elapsedSeconds: number): void {
@@ -1021,7 +1114,16 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
           : null,
         loopIndex: state.loopIndex,
         targetLoops: state.targetLoops,
-        anomaly: currentHallwayState.currentAnomalyId,
+        anomaly: state.currentAnomalyId,
+        visualAnomaly: currentHallwayState.currentAnomalyId,
+        queuedAnomaly: nextHallway?.state.currentAnomalyId ?? null,
+        timedThreat: activeTimedAnomalyId
+          ? {
+              id: activeTimedAnomalyId,
+              elapsed: roundForText(timedThreatElapsed),
+              progress: roundForText(getTimedThreatProgress())
+            }
+          : null,
         ambienceLevel: state.ambienceLevel,
         visibleAmbienceLevel: roundForText(smoothedAmbienceLevel),
         hallwayWalker: hallwayWalker.snapshot(),

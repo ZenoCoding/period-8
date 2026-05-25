@@ -67,6 +67,7 @@ export interface HallwayWalkerSnapshot {
 export interface HallwayWalker {
   readonly root: THREE.Group;
   start(parent: THREE.Object3D): void;
+  setHeadTracking(isTracking: boolean, playerWorldPosition?: THREE.Vector3, elapsedSeconds?: number): void;
   update(deltaSeconds: number): void;
   snapshot(): HallwayWalkerSnapshot;
   dispose(): void;
@@ -85,6 +86,12 @@ class ImportedHallwayWalker implements HallwayWalker {
   private mixer: THREE.AnimationMixer | null = null;
   private walkAction: THREE.AnimationAction | null = null;
   private idleAction: THREE.AnimationAction | null = null;
+  private headBone: THREE.Object3D | null = null;
+  private readonly headCutCollar: THREE.Mesh;
+  private baseHeadRotation: THREE.Euler | null = null;
+  private isHeadTracking = false;
+  private headTrackingTarget = new THREE.Vector3();
+  private headTrackingElapsedSeconds = 0;
   private routeIndex = 0;
   private routeSegmentDistance = 1;
   private routeSegmentProgress = 0;
@@ -99,6 +106,8 @@ class ImportedHallwayWalker implements HallwayWalker {
   constructor() {
     this.root.name = 'opposite-side-hallway-walker';
     this.root.visible = false;
+    this.headCutCollar = createHeadCutCollar();
+    this.root.add(this.headCutCollar);
     void this.loadModel();
   }
 
@@ -116,6 +125,7 @@ class ImportedHallwayWalker implements HallwayWalker {
     this.stepId = 0;
     this.stepSide = -1;
     this.playWalk();
+    this.setHeadTracking(false);
   }
 
   update(deltaSeconds: number): void {
@@ -130,7 +140,23 @@ class ImportedHallwayWalker implements HallwayWalker {
     }
 
     this.mixer?.update(deltaSeconds);
+    this.updateHeadTracking();
     this.updateFootstepPulse(previousWalkPhase);
+  }
+
+  setHeadTracking(isTracking: boolean, playerWorldPosition?: THREE.Vector3, elapsedSeconds = 0): void {
+    this.isHeadTracking = isTracking;
+    this.headTrackingElapsedSeconds = elapsedSeconds;
+
+    if (playerWorldPosition) {
+      this.headTrackingTarget.copy(playerWorldPosition);
+    }
+
+    if (!isTracking) {
+      this.restoreHeadRotation();
+    }
+
+    this.headCutCollar.visible = isTracking;
   }
 
   snapshot(): HallwayWalkerSnapshot {
@@ -178,6 +204,8 @@ class ImportedHallwayWalker implements HallwayWalker {
         }
       });
 
+      this.headBone = model.getObjectByName('Head') ?? null;
+      this.baseHeadRotation = this.headBone?.rotation.clone() ?? null;
       this.root.add(model);
       this.mixer = new THREE.AnimationMixer(model);
       this.walkAction = createAction(this.mixer, asset.animations, 'Walk');
@@ -263,6 +291,41 @@ class ImportedHallwayWalker implements HallwayWalker {
     this.lastWalkPhase = nextPhase;
   }
 
+  private updateHeadTracking(): void {
+    if (!this.headBone || !this.baseHeadRotation) {
+      return;
+    }
+
+    if (!this.isHeadTracking || !this.root.visible) {
+      this.restoreHeadRotation();
+      this.headCutCollar.visible = false;
+      return;
+    }
+
+    this.headCutCollar.visible = true;
+
+    const target = this.root.worldToLocal(this.headTrackingTarget.clone());
+    const dx = target.x;
+    const dz = target.z;
+    const dy = target.y - WALKER_HEIGHT * 0.9;
+    const yaw = Math.atan2(dx, dz) + Math.sin(this.headTrackingElapsedSeconds * 0.75) * 0.04;
+    const pitch = THREE.MathUtils.clamp(-dy * 0.16, -0.28, 0.28);
+
+    this.headBone.rotation.set(
+      this.baseHeadRotation.x + pitch,
+      this.baseHeadRotation.y + yaw,
+      this.baseHeadRotation.z + Math.sin(this.headTrackingElapsedSeconds * 1.25) * 0.035
+    );
+  }
+
+  private restoreHeadRotation(): void {
+    if (!this.headBone || !this.baseHeadRotation) {
+      return;
+    }
+
+    this.headBone.rotation.copy(this.baseHeadRotation);
+  }
+
   private advanceRoute(deltaSeconds: number): void {
     if (this.routeIndex >= WALKER_ROUTE.length - 1) {
       this.stopAtEnd();
@@ -343,6 +406,23 @@ function ageBusinessManMaterials(model: THREE.Object3D): void {
 
     applyMaterialTint(object.material);
   });
+}
+
+function createHeadCutCollar(): THREE.Mesh {
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x050505,
+    emissive: 0x120202,
+    emissiveIntensity: 0.14,
+    roughness: 0.86,
+    metalness: 0.02
+  });
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.135, 0.045, 20), material);
+  collar.name = 'walker-head-cut-collar';
+  collar.position.set(0, WALKER_HEIGHT * 0.82, 0);
+  collar.scale.z = 0.78;
+  collar.visible = false;
+  collar.castShadow = true;
+  return collar;
 }
 
 function applyMaterialTint(material: THREE.Material | THREE.Material[]): void {

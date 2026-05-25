@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createInitialGameState, resolvePortalTransition } from './gameState';
+import { createInitialGameState, resolvePortalTransition, resolveTimedAnomalyTimeout } from './gameState';
 import type { GameState } from './types';
 
 describe('hallway loop simulation', () => {
@@ -60,5 +60,24 @@ describe('hallway loop simulation', () => {
     expect(result.wasCorrect).toBe(true);
     expect(result.state.phase).toBe('escaped');
     expect(result.state.lastOutcome).toBe('escaped');
+  });
+
+  it('soft-resets and escalates ambience when a timed anomaly catches the player', () => {
+    const threatened: GameState = {
+      ...createInitialGameState(),
+      loopIndex: 7,
+      currentAnomalyId: 'red-flood',
+      expectedAction: 'backward',
+      ambienceLevel: 1,
+      streak: 5
+    };
+
+    const result = resolveTimedAnomalyTimeout(threatened);
+
+    expect(result.loopIndex).toBe(1);
+    expect(result.failCount).toBe(1);
+    expect(result.ambienceLevel).toBe(2);
+    expect(result.streak).toBe(0);
+    expect(result.lastOutcome).toBe('wrong');
   });
 });
