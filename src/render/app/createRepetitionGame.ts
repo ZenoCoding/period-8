@@ -84,6 +84,7 @@ const MAIN_INTERIOR_Z_MAX = MAIN_HALF_LENGTH - 0.55;
 const COMMITTED_VIEW_LIMIT = 1.22;
 const FOOTSTEP_SAMPLE_PATH = '/audio/footsteps/freesound-community-footsteps-in-a-hallway-47842.mp3?v=raw-segments-2';
 const LIGHT_FAILURE_SAMPLE_PATH = '/audio/lights/fluorescent-light-flickering-unstuntedsfx.mp3';
+const PERIOD_BELL_SAMPLE_PATH = '/audio/bells/old-school-bell-2-ezwa-pdsounds.mp3';
 const RECORDED_FOOTSTEP_SLICE_DURATION = 0.52;
 const RECORDED_FOOTSTEP_SEGMENT_OFFSETS = [
   0.62,
@@ -514,6 +515,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     setTransitionSignVisible(hallway, activeTransition.side);
     renderHud(hud, state);
     pulseScreenDistortion(commit.result.wasCorrect ? 0.82 : 1);
+    audio.playPeriodBell();
 
     activeTransition = markTransitionPostCommit(activeTransition);
     transitionPhase = activeTransition.phase;
@@ -1514,6 +1516,7 @@ function average(values: number[]): number {
 interface HorrorAudio {
   resume(): void;
   suspend(): void;
+  playPeriodBell(): void;
   update(
     state: GameState,
     ambienceLevel: number,
@@ -1555,6 +1558,8 @@ function createHorrorAudio(): HorrorAudio {
   let recordedFootstepLoad: Promise<void> | null = null;
   let lightFailureBuffer: AudioBuffer | null = null;
   let lightFailureLoad: Promise<void> | null = null;
+  let periodBellBuffer: AudioBuffer | null = null;
+  let periodBellLoad: Promise<void> | null = null;
   let nextFootstepTime = 0;
   let footstepIndex = 0;
   let lastWalkerFootstepId = 0;
@@ -1637,6 +1642,7 @@ function createHorrorAudio(): HorrorAudio {
     flickerNoise.start();
     loadRecordedFootsteps();
     loadLightFailureSample();
+    loadPeriodBellSample();
   };
 
   const loadRecordedFootsteps = (): void => {
@@ -1684,6 +1690,30 @@ function createHorrorAudio(): HorrorAudio {
       })
       .catch((error: unknown) => {
         console.warn(`Could not load light failure sample ${LIGHT_FAILURE_SAMPLE_PATH}`, error);
+      });
+  };
+
+  const loadPeriodBellSample = (): void => {
+    if (!context || periodBellLoad) {
+      return;
+    }
+
+    const targetContext = context;
+    periodBellLoad = fetch(PERIOD_BELL_SAMPLE_PATH)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((audioData) => targetContext.decodeAudioData(audioData))
+      .then((decodedBuffer) => {
+        if (context === targetContext) {
+          periodBellBuffer = decodedBuffer;
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn(`Could not load period bell sample ${PERIOD_BELL_SAMPLE_PATH}`, error);
       });
   };
 
@@ -1884,6 +1914,107 @@ function createHorrorAudio(): HorrorAudio {
     whirr.onended = cleanup;
   };
 
+  const playPeriodBellSound = (time: number): void => {
+    if (!context || !dryBus || !roomSend) {
+      return;
+    }
+
+    if (periodBellBuffer) {
+      const source = context.createBufferSource();
+      const gain = context.createGain();
+      const filterNode = context.createBiquadFilter();
+      const roomGain = context.createGain();
+      source.buffer = periodBellBuffer;
+      source.playbackRate.setValueAtTime(1, time);
+      filterNode.type = 'highpass';
+      filterNode.frequency.setValueAtTime(220, time);
+      gain.gain.setValueAtTime(0.0001, time);
+      gain.gain.linearRampToValueAtTime(0.95, time + 0.018);
+      gain.gain.setValueAtTime(0.95, time + 4.2);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + 5.35);
+      roomGain.gain.setValueAtTime(0.28, time);
+      source.connect(filterNode).connect(gain);
+      gain.connect(dryBus);
+      gain.connect(roomGain).connect(roomSend);
+      source.start(time, 0.32, Math.min(5.35, periodBellBuffer.duration - 0.32));
+      source.onended = () => {
+        source.disconnect();
+        gain.disconnect();
+        filterNode.disconnect();
+        roomGain.disconnect();
+      };
+      return;
+    }
+
+    const hitStarts = [time, time + 0.46];
+    for (const [hitIndex, startTime] of hitStarts.entries()) {
+      const hitGain = context.createGain();
+      const roomGain = context.createGain();
+      const ringFilter = context.createBiquadFilter();
+      const partials = [
+        { frequency: 720, gain: 0.22 },
+        { frequency: 1086, gain: 0.18 },
+        { frequency: 1540, gain: 0.105 },
+        { frequency: 2320, gain: 0.045 }
+      ];
+
+      ringFilter.type = 'bandpass';
+      ringFilter.frequency.setValueAtTime(1180, startTime);
+      ringFilter.frequency.exponentialRampToValueAtTime(860, startTime + 1.1);
+      ringFilter.Q.setValueAtTime(1.7, startTime);
+      hitGain.gain.setValueAtTime(0.0001, startTime);
+      hitGain.gain.linearRampToValueAtTime(hitIndex === 0 ? 0.78 : 0.64, startTime + 0.012);
+      hitGain.gain.exponentialRampToValueAtTime(0.0001, startTime + 1.35);
+      roomGain.gain.setValueAtTime(0.34, startTime);
+
+      ringFilter.connect(hitGain);
+      hitGain.connect(dryBus);
+      hitGain.connect(roomGain).connect(roomSend);
+
+      let activePartials = partials.length;
+      for (const partial of partials) {
+        const oscillator = context.createOscillator();
+        const partialGain = context.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(partial.frequency * (hitIndex === 0 ? 1 : 0.992), startTime);
+        oscillator.detune.setValueAtTime((hitIndex * 4 - 3) + Math.random() * 2, startTime);
+        partialGain.gain.setValueAtTime(partial.gain, startTime);
+        oscillator.connect(partialGain).connect(ringFilter);
+        oscillator.start(startTime);
+        oscillator.stop(startTime + 1.42);
+        oscillator.onended = () => {
+          oscillator.disconnect();
+          partialGain.disconnect();
+          activePartials -= 1;
+          if (activePartials === 0) {
+            ringFilter.disconnect();
+            hitGain.disconnect();
+            roomGain.disconnect();
+          }
+        };
+      }
+
+      const noise = context.createBufferSource();
+      const noiseGain = context.createGain();
+      const noiseFilter = context.createBiquadFilter();
+      noise.buffer = createElectricCrackleBuffer(context, 0.18);
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.setValueAtTime(3400, startTime);
+      noiseFilter.Q.setValueAtTime(2.8, startTime);
+      noiseGain.gain.setValueAtTime(0.0001, startTime);
+      noiseGain.gain.linearRampToValueAtTime(hitIndex === 0 ? 0.11 : 0.075, startTime + 0.006);
+      noiseGain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.16);
+      noise.connect(noiseFilter).connect(noiseGain).connect(ringFilter);
+      noise.start(startTime);
+      noise.stop(startTime + 0.18);
+      noise.onended = () => {
+        noise.disconnect();
+        noiseFilter.disconnect();
+        noiseGain.disconnect();
+      };
+    }
+  };
+
   return {
     resume(): void {
       ensureContext();
@@ -1892,6 +2023,24 @@ function createHorrorAudio(): HorrorAudio {
     suspend(): void {
       if (context?.state === 'running') {
         void context.suspend();
+      }
+    },
+    playPeriodBell(): void {
+      if (!context) {
+        ensureContext();
+      }
+
+      if (context?.state === 'running' && !periodBellBuffer && periodBellLoad) {
+        void periodBellLoad.then(() => {
+          if (context?.state === 'running') {
+            playPeriodBellSound(context.currentTime + 0.025);
+          }
+        });
+        return;
+      }
+
+      if (context?.state === 'running') {
+        playPeriodBellSound(context.currentTime + 0.025);
       }
     },
     update(
@@ -1998,6 +2147,8 @@ function createHorrorAudio(): HorrorAudio {
       recordedFootstepLoad = null;
       lightFailureBuffer = null;
       lightFailureLoad = null;
+      periodBellBuffer = null;
+      periodBellLoad = null;
       nextFootstepTime = 0;
       lastWalkerFootstepId = 0;
       walkerFootstepIndex = 0;

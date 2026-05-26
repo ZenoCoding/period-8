@@ -308,7 +308,7 @@ class ImportedHallwayWalker implements HallwayWalker {
     const dx = target.x;
     const dz = target.z;
     const dy = target.y - WALKER_HEIGHT * 0.9;
-    const yaw = Math.atan2(dx, dz) + Math.sin(this.headTrackingElapsedSeconds * 0.75) * 0.04;
+    const yaw = Math.atan2(dx, dz) + Math.PI + Math.sin(this.headTrackingElapsedSeconds * 0.75) * 0.04;
     const pitch = THREE.MathUtils.clamp(-dy * 0.16, -0.28, 0.28);
 
     this.headBone.rotation.set(
