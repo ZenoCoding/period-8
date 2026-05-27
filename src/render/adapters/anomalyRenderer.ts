@@ -22,6 +22,7 @@ const SCHOOL_TRIM = new THREE.Color(0xc7beb2);
 const HORROR_TRIM = new THREE.Color(0x59615c);
 const MAX_AMBIENCE = 5;
 const BASE_FLUORESCENT_INTENSITIES = [13.8, 12.8, 11.6, 12.2, 10.8, 10.4] as const;
+const BASE_FLUORESCENT_COLOR = 0xe2f2ff;
 
 export interface LightFailureEffectState {
   progress: number;
@@ -34,35 +35,28 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
   switch (anomalyId) {
     case null:
       break;
-    case 'locker-ajar':
-      handles.lockerDoor.visible = true;
-      handles.lockerInterior.visible = true;
-      handles.lockerDoor.rotation.y = -0.82;
-      handles.lockerDoor.position.x -= 0.05;
-      handles.lockerInteriorMaterial.emissive.setHex(0x160302);
-      handles.lockerInteriorMaterial.emissiveIntensity = 0.4;
+    case 'locker-count-missing':
+      for (const locker of handles.lockerMissingTargets) {
+        locker.visible = false;
+      }
       break;
     case 'clock-wrong':
-      handles.clockHourPivot.rotation.z = THREE.MathUtils.degToRad(-359);
-      handles.clockMinutePivot.rotation.z = THREE.MathUtils.degToRad(-348);
+      handles.clockHourPivot.rotation.z = THREE.MathUtils.degToRad(-108);
+      handles.clockMinutePivot.rotation.z = THREE.MathUtils.degToRad(-94);
       handles.clockSecondPivot.visible = true;
-      handles.clockSecondMaterial.emissiveIntensity = 1.5;
+      handles.clockSecondMaterial.emissiveIntensity = 0.45;
       break;
     case 'camera-tracking':
-      handles.securityCameraLensMaterial.emissive.setHex(0x123f22);
-      handles.securityCameraLensMaterial.emissiveIntensity = 1.6;
+      handles.securityCameraLensMaterial.emissive.setHex(0x10241b);
+      handles.securityCameraLensMaterial.emissiveIntensity = 0.75;
       break;
     case 'vent-open':
-      handles.ventCover.position.y -= 0.09;
-      handles.ventCover.position.x += 0.12;
-      handles.ventCover.rotation.z = THREE.MathUtils.degToRad(4.5);
-      handles.ventDarkness.scale.set(1.08, 1, 1.08);
+      handles.ventCover.position.y -= 0.045;
+      handles.ventCover.position.x += 0.06;
+      handles.ventCover.rotation.z = THREE.MathUtils.degToRad(2.3);
+      handles.ventDarkness.scale.set(1.04, 1, 1.04);
       break;
     case 'light-failure':
-      break;
-    case 'tile-mismatch':
-      handles.mismatchTile.visible = true;
-      handles.mismatchTile.position.y = 0.036;
       break;
     case 'bulletin-board':
       setBulletinBoardWarning(handles, true);
@@ -70,12 +64,6 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
     case 'man-staring':
       break;
     case 'man-face-missing':
-      handles.hallwayFigure.visible = true;
-      handles.hallwayFigureHeadMaterial.color.setHex(0xb8b3a9);
-      handles.hallwayFigureFaceMaterial.color.setHex(0x080808);
-      handles.hallwayFigureFaceMaterial.emissive.setHex(0x000000);
-      handles.hallwayFigureFaceMaterial.emissiveIntensity = 0;
-      handles.hallwayFigureHead.scale.set(1.08, 1.08, 1.08);
       break;
     case 'red-flood':
       handles.redFlood.visible = true;
@@ -83,6 +71,37 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
       handles.redFloodWave.visible = true;
       handles.redFloodWake.visible = true;
       handles.redFloodMaterial.opacity = 0.88;
+      break;
+    case 'door-label-wrong':
+      handles.doorLabelWrong.visible = true;
+      break;
+    case 'door-handle-centered':
+      handles.doorHandleCentered.visible = true;
+      break;
+    case 'ceiling-stain-face':
+      handles.ceilingStainFace.visible = true;
+      break;
+    case 'yellow-lights':
+      for (const light of handles.fluorescentLights) {
+        light.color.setHex(0xffd46f);
+        light.intensity *= 0.82;
+      }
+      for (const material of handles.fluorescentTubeMaterials) {
+        material.color.setHex(0xffe38a);
+        material.emissive.setHex(0xffbb48);
+        material.emissiveIntensity = 1.18;
+      }
+      break;
+    case 'floor-extra-tile':
+      handles.floorExtraTile.visible = true;
+      break;
+    case 'poster-eyes':
+      for (const eye of handles.posterEyeTrackers) {
+        eye.mesh.visible = true;
+      }
+      break;
+    case 'poster-face-wrong':
+      handles.posterFaceWrongOverlay.visible = true;
       break;
   }
 }
@@ -100,33 +119,36 @@ export function updateAnomaly(
   }
 
   if (state.currentAnomalyId === 'clock-wrong') {
-    handles.clockSecondPivot.rotation.z = -elapsedSeconds * 1.6;
+    handles.clockSecondPivot.rotation.z = Math.sin(elapsedSeconds * 0.45) * 0.03 + THREE.MathUtils.degToRad(-92);
   }
 
   if (state.currentAnomalyId === 'light-failure') {
     updateLightFailure(handles, elapsedSeconds, lightFailure);
   }
 
-  if (state.currentAnomalyId === 'locker-ajar') {
-    const pulse = Math.sin(elapsedSeconds * 2.8) * 0.5 + 0.5;
-    handles.lockerDoor.rotation.y = -0.82 - pulse * 0.035;
-    handles.lockerInteriorMaterial.emissiveIntensity = 0.28 + pulse * 0.45;
-  }
-
   if (state.currentAnomalyId === 'vent-open') {
     const sway = Math.sin(elapsedSeconds * 1.9) * 0.018;
-    handles.ventCover.rotation.z = THREE.MathUtils.degToRad(4.5) + sway;
-    handles.ventDarkness.scale.setScalar(1.06 + Math.max(0, Math.sin(elapsedSeconds * 3.1)) * 0.08);
-  }
-
-  if (state.currentAnomalyId === 'man-face-missing') {
-    const tilt = Math.sin(elapsedSeconds * 0.82) * 0.05;
-    handles.hallwayFigureHead.rotation.x = tilt;
-    handles.hallwayFigure.rotation.y += Math.sin(elapsedSeconds * 1.2) * 0.0009;
+    handles.ventCover.rotation.z = THREE.MathUtils.degToRad(2.3) + sway * 0.45;
+    handles.ventDarkness.scale.setScalar(1.03 + Math.max(0, Math.sin(elapsedSeconds * 2.1)) * 0.035);
   }
 
   if (state.currentAnomalyId === 'red-flood') {
     updateRedFlood(handles, timedThreatProgress, elapsedSeconds);
+  }
+
+  if (state.currentAnomalyId === 'yellow-lights') {
+    const pulse = Math.sin(elapsedSeconds * 5.2) * 0.5 + 0.5;
+    for (const [index, light] of handles.fluorescentLights.entries()) {
+      light.intensity = (BASE_FLUORESCENT_INTENSITIES[index] ?? 10) * (0.78 + pulse * 0.06);
+    }
+  }
+
+  if (state.currentAnomalyId === 'poster-eyes') {
+    updatePosterEyes(handles, playerPosition);
+  }
+
+  if (state.currentAnomalyId === 'poster-face-wrong') {
+    updatePosterFaceWrong(handles, elapsedSeconds);
   }
 }
 
@@ -183,18 +205,26 @@ function resetAnomalies(handles: HallwayHandles): void {
 
   handles.lockerDoor.visible = false;
   handles.lockerInterior.visible = false;
+  for (const locker of handles.lockerMissingTargets) {
+    locker.visible = true;
+  }
   handles.lockerInteriorMaterial.emissive.setHex(0x050202);
   handles.lockerInteriorMaterial.emissiveIntensity = 0;
   handles.clockSecondPivot.visible = false;
   handles.clockSecondMaterial.emissiveIntensity = 0;
   handles.securityCameraLensMaterial.emissive.setHex(0x001a0e);
   handles.securityCameraLensMaterial.emissiveIntensity = 0.25;
+  handles.doorLabelWrong.visible = false;
+  handles.doorHandleCentered.visible = false;
+  handles.ceilingStainFace.visible = false;
+  handles.floorExtraTile.visible = false;
   handles.ventDarkness.scale.set(1, 1, 1);
   handles.flickerLight.intensity = 11.6;
   handles.flickerTubeMaterial.color.setHex(0xf6fbff);
   handles.flickerTubeMaterial.emissive.setHex(0xdbf0ff);
   handles.flickerTubeMaterial.emissiveIntensity = 1.85;
   for (const [index, light] of handles.fluorescentLights.entries()) {
+    light.color.setHex(BASE_FLUORESCENT_COLOR);
     light.intensity = BASE_FLUORESCENT_INTENSITIES[index] ?? 10;
   }
   for (const material of handles.fluorescentTubeMaterials) {
@@ -208,6 +238,8 @@ function resetAnomalies(handles: HallwayHandles): void {
       spark.visible = false;
       if (spark instanceof THREE.Mesh) {
         spark.scale.setScalar(1);
+        setMaterialOpacity(spark.material, 0);
+      } else if (spark instanceof THREE.Points) {
         setMaterialOpacity(spark.material, 0);
       }
     }
@@ -231,6 +263,29 @@ function resetAnomalies(handles: HallwayHandles): void {
   handles.redFloodFoamMaterial.opacity = 0;
   handles.redFloodWaveMaterial.opacity = 0;
   handles.redFloodWakeMaterial.opacity = 0;
+  for (const eye of handles.posterEyeTrackers) {
+    eye.mesh.visible = false;
+    eye.mesh.position.x = eye.baseX;
+    eye.mesh.position.y = eye.baseY;
+  }
+  handles.posterFaceWrongOverlay.visible = false;
+  handles.posterFaceWrongOverlay.position.x = 0.034;
+  handles.posterFaceWrongOverlay.rotation.z = THREE.MathUtils.degToRad(-1.8);
+}
+
+function updatePosterEyes(handles: HallwayHandles, playerPosition: THREE.Vector3): void {
+  for (const eye of handles.posterEyeTrackers) {
+    const localPlayer = eye.poster.worldToLocal(playerPosition.clone());
+    const shiftX = THREE.MathUtils.clamp(localPlayer.x * 0.004, -0.012, 0.012);
+    const shiftY = THREE.MathUtils.clamp((localPlayer.y - eye.baseY) * 0.006, -0.008, 0.008);
+    eye.mesh.position.x = eye.baseX + shiftX;
+    eye.mesh.position.y = eye.baseY + shiftY;
+  }
+}
+
+function updatePosterFaceWrong(handles: HallwayHandles, elapsedSeconds: number): void {
+  handles.posterFaceWrongOverlay.position.x = 0.034 + Math.sin(elapsedSeconds * 0.7) * 0.004;
+  handles.posterFaceWrongOverlay.rotation.z = THREE.MathUtils.degToRad(-1.8 + Math.sin(elapsedSeconds * 0.46) * 0.8);
 }
 
 function updateLightFailure(
@@ -277,6 +332,11 @@ function updateFluorescentSparks(handles: HallwayHandles, sparkPulse: number, el
         continue;
       }
 
+      if (spark instanceof THREE.Points) {
+        updateSparkParticles(spark, pulse, elapsedSeconds, groupIndex);
+        continue;
+      }
+
       if (!(spark instanceof THREE.Mesh)) {
         continue;
       }
@@ -299,6 +359,35 @@ function updateFluorescentSparks(handles: HallwayHandles, sparkPulse: number, el
       spark.scale.set(1, 1 + pulse * (1.8 + (sparkIndex % 3) * 0.5), 1);
       setMaterialOpacity(spark.material, Math.min(1, pulse * (0.78 + (sparkIndex % 4) * 0.1)));
     }
+  }
+}
+
+function updateSparkParticles(points: THREE.Points, pulse: number, elapsedSeconds: number, groupIndex: number): void {
+  const geometry = points.geometry;
+  const positionAttribute = geometry.getAttribute('position');
+  if (!(positionAttribute instanceof THREE.BufferAttribute)) {
+    return;
+  }
+
+  const seedBase = Number(points.userData.seed ?? groupIndex * 19);
+  for (let index = 0; index < positionAttribute.count; index += 1) {
+    const seed = seedBase + index * 13;
+    const time = (elapsedSeconds * (1.2 + (index % 5) * 0.18) + seed * 0.017) % 1;
+    const fall = time * time;
+    const side = Math.sin(seed * 12.9898) * 0.46;
+    const forward = Math.cos(seed * 78.233) * 0.38;
+    positionAttribute.setXYZ(
+      index,
+      side * pulse * time,
+      -0.04 - fall * (0.42 + (index % 4) * 0.06),
+      forward * pulse * time
+    );
+  }
+
+  positionAttribute.needsUpdate = true;
+  if (points.material instanceof THREE.PointsMaterial) {
+    points.material.opacity = Math.min(1, pulse * 0.95);
+    points.material.size = 0.035 + pulse * 0.045;
   }
 }
 

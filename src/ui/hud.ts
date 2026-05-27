@@ -89,10 +89,12 @@ export function renderHud(hud: HudElements, state: GameState): void {
   hud.message.textContent = '';
   hud.debug.textContent = [
     `Correct: ${state.streak}/${state.targetLoops}`,
-    `Loop seed: ${state.loopIndex}`,
+    `Period: ${state.loopIndex}/${state.targetLoops}`,
     `Expected: ${state.expectedAction}`,
     `Active anomaly: ${anomaly?.label ?? 'none'}`,
     `Subtlety: ${anomaly?.subtlety ?? 'n/a'}`,
+    `Encounter: ${Math.round(state.encounterChance * 100)}% roll ${state.encounterRoll.toFixed(2)}`,
+    `Recent: ${state.recentAnomalyIds.join(', ') || 'none'}`,
     `Streak: ${state.streak}`,
     `Fails: ${state.failCount}`
   ].join('\n');

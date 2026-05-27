@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACTIVE_ANOMALY_IDS, pickEncounterForLoop } from './anomalies';
+import { ACTIVE_ANOMALY_IDS, selectEncounterForPeriod } from './anomalies';
 
 function randomSequence(values: number[]): () => number {
   let index = 0;
@@ -7,32 +7,53 @@ function randomSequence(values: number[]): () => number {
 }
 
 describe('anomaly encounter picker', () => {
-  it('never starts the first hallway with an anomaly', () => {
-    expect(pickEncounterForLoop(1, 0, randomSequence([0.99, 0.99]))).toBeNull();
+  it('never starts Period 0 with an anomaly', () => {
+    const selection = selectEncounterForPeriod({
+      periodIndex: 0,
+      random: randomSequence([0])
+    });
+
+    expect(selection.anomalyId).toBeNull();
+    expect(selection.chance).toBe(0);
   });
 
-  it('balances each two-loop pair to one normal and one anomaly', () => {
-    const pair = [
-      pickEncounterForLoop(2, 0, randomSequence([0])),
-      pickEncounterForLoop(3, 0, randomSequence([0]))
-    ];
+  it('uses near-50/50 rolls after Period 0', () => {
+    const clean = selectEncounterForPeriod({
+      periodIndex: 1,
+      encounterHistory: [null],
+      random: randomSequence([0.99])
+    });
+    const anomaly = selectEncounterForPeriod({
+      periodIndex: 1,
+      encounterHistory: [null],
+      random: randomSequence([0.01, 0])
+    });
 
-    expect(pair.filter(Boolean)).toHaveLength(1);
-    expect(pair).toContain(null);
+    expect(clean.anomalyId).toBeNull();
+    expect(anomaly.anomalyId).toBe(ACTIVE_ANOMALY_IDS[0]);
   });
 
-  it('uses the random roll to choose the active anomaly inside the anomaly slot', () => {
-    const firstAnomalyPair = [
-      pickEncounterForLoop(2, 0, randomSequence([0])),
-      pickEncounterForLoop(3, 0, randomSequence([0]))
-    ];
-    const lastAnomalyPair = [
-      pickEncounterForLoop(2, 0, randomSequence([0.999])),
-      pickEncounterForLoop(3, 0, randomSequence([0.999]))
-    ];
+  it('forces an anomaly after two clean periods', () => {
+    const selection = selectEncounterForPeriod({
+      periodIndex: 2,
+      encounterHistory: [null, null],
+      random: randomSequence([0.99, 0])
+    });
 
-    expect(firstAnomalyPair.find(Boolean)).toBe(ACTIVE_ANOMALY_IDS[0]);
-    expect(lastAnomalyPair.find(Boolean)).toBe(ACTIVE_ANOMALY_IDS[ACTIVE_ANOMALY_IDS.length - 1]);
+    expect(selection.anomalyId).toBe(ACTIVE_ANOMALY_IDS[0]);
+  });
+
+  it('prevents exact repeats from the last three anomaly appearances', () => {
+    const selection = selectEncounterForPeriod({
+      periodIndex: 5,
+      encounterHistory: [null, 'locker-count-missing', null, 'clock-wrong', null, 'camera-tracking'],
+      recentAnomalyIds: ['camera-tracking', 'clock-wrong', 'locker-count-missing'],
+      random: randomSequence([0.01, 0])
+    });
+
+    expect(selection.anomalyId).not.toBe('locker-count-missing');
+    expect(selection.anomalyId).not.toBe('clock-wrong');
+    expect(selection.anomalyId).not.toBe('camera-tracking');
   });
 
   it('keeps retired anomalies out of random rotation', () => {

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { applyKeyChange, createInputState } from '../../game/input/actions';
-import { ANOMALY_BY_ID } from '../../game/simulation/anomalies';
-import { createInitialGameState, resolveTimedAnomalyTimeout } from '../../game/simulation/gameState';
+import { ACTIVE_ANOMALY_IDS, ANOMALY_BY_ID, type AnomalyId } from '../../game/simulation/anomalies';
+import { createInitialGameState, expectedActionForAnomaly, resolveTimedAnomalyTimeout } from '../../game/simulation/gameState';
 import type { GameState } from '../../game/simulation/types';
 import { createHud, renderHud } from '../../ui/hud';
 import { applyAnomaly, updateAnomaly, updateAtmosphere, type LightFailureEffectState } from '../adapters/anomalyRenderer';
@@ -22,7 +22,7 @@ import {
   type BoundsRect,
   type HallwayHandles
 } from '../objects/hallway';
-import { createHallwayWalker, type HallwayWalkerSnapshot } from '../objects/hallwayWalker';
+import { createHallwayWalker, type HallwayWalkerSnapshot, type WalkerAnomalyMode } from '../objects/hallwayWalker';
 import {
   beginTransition,
   commitTransition,
@@ -185,6 +185,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let activeTransition: ActiveTransition | null = null;
   let suppressedExitSide: TransitionSide | null = null;
   let debugNotice = '';
+  let debugForcedAnomalyId: AnomalyId | null | 'clean' = null;
+  let debugForcedAnomalyIndex = -1;
   let yaw = 0;
   let pitch = 0;
   let transitionVisualPulse = 0;
@@ -343,7 +345,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     if (nextHallway) {
       updateAtmosphere(scene, nextHallway.handles, state, visibleAmbienceLevel);
     }
-    hallwayWalker.setHeadTracking(currentHallwayState.currentAnomalyId === 'man-staring', playerPosition, elapsedSeconds);
+    hallwayWalker.setAnomalyMode(getWalkerAnomalyMode(currentHallwayState.currentAnomalyId), playerPosition, elapsedSeconds);
     hallwayWalker.update(deltaSeconds);
     hud.setDebugVisible(input.debug);
     if (input.debug) {
@@ -693,7 +695,87 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       return true;
     }
 
+    if (code === 'KeyX') {
+      cycleDebugForcedAnomaly();
+      return true;
+    }
+
+    if (code === 'KeyZ') {
+      forceDebugAnomaly(null);
+      return true;
+    }
+
+    if (code === 'KeyO') {
+      debugForcedAnomalyId = null;
+      debugForcedAnomalyIndex = -1;
+      debugNotice = 'Cleared forced anomaly';
+      return true;
+    }
+
+    if (code === 'KeyP') {
+      resetDebugPeriod();
+      return true;
+    }
+
     return false;
+  }
+
+  function cycleDebugForcedAnomaly(): void {
+    debugForcedAnomalyIndex = (debugForcedAnomalyIndex + 1) % ACTIVE_ANOMALY_IDS.length;
+    forceDebugAnomaly(ACTIVE_ANOMALY_IDS[debugForcedAnomalyIndex]);
+  }
+
+  function forceDebugAnomaly(anomalyId: AnomalyId | null): void {
+    debugForcedAnomalyId = anomalyId ?? 'clean';
+    const forcedState: GameState = {
+      ...state,
+      phase: 'playing',
+      currentAnomalyId: anomalyId,
+      expectedAction: expectedActionForAnomaly(anomalyId),
+      lastOutcome: 'idle',
+      lastMessage: anomalyId ? `Debug forced ${anomalyId}.` : 'Debug forced clean hallway.'
+    };
+    applyDebugState(forcedState);
+    debugNotice = anomalyId ? `Forced anomaly ${anomalyId}` : 'Forced clean hallway';
+  }
+
+  function resetDebugPeriod(): void {
+    debugForcedAnomalyId = null;
+    debugForcedAnomalyIndex = -1;
+    applyDebugState(createInitialGameState());
+    playerPosition.copy(NEGATIVE_HALLWAY_START);
+    yaw = 0;
+    pitch = 0;
+    debugNotice = 'Reset to Period 0';
+  }
+
+  function applyDebugState(nextState: GameState): void {
+    state = nextState;
+    currentHallwayState = nextState;
+    activeTransition = null;
+    transitionPhase = 'observing';
+    suppressedExitSide = null;
+    activeTimedAnomalyId = null;
+    timedThreatElapsed = 0;
+    lightFailureElapsed = 0;
+    lightFailureBlackoutElapsed = 0;
+    hasLightFailureBlackoutStarted = false;
+    didCueLightFailureAudio = false;
+
+    if (nextHallway) {
+      hideHallwayCell(nextHallway);
+      nextHallway = null;
+    }
+
+    configureHallwayForState({ handles: hallway, state: nextState, walkableRects: WALKABLE_RECTS }, nextState);
+    resetTransitionSigns(nextState.loopIndex, 'idle');
+    renderHud(hud, nextState);
+
+    if (nextState.currentAnomalyId === 'man-staring' || nextState.currentAnomalyId === 'man-face-missing') {
+      hallwayWalker.start(hallway.root);
+    }
+
+    pulseScreenDistortion(0.75);
   }
 
   function getTuningCaptureContext(): { side: TransitionSide; local: THREE.Vector3 } {
@@ -721,7 +803,10 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       `Position: x ${formatNumber(local.x)} z ${formatNumber(local.z)} yaw ${formatNumber(yaw)}`,
       queuedLocal ? `Queued local: x ${formatNumber(queuedLocal.x)} z ${formatNumber(queuedLocal.z)}` : 'Queued local: none',
       `Transition: ${transitionPhase} side ${formatSide(side)}`,
-      `Level: ${state.loopIndex}/${state.targetLoops} outcome ${state.lastOutcome}`,
+      `Period: ${state.loopIndex}/${state.targetLoops} outcome ${state.lastOutcome}`,
+      `Encounter: ${formatNumber(state.encounterChance * 100)}% roll ${formatNumber(state.encounterRoll)}`,
+      `Recent anomalies: ${state.recentAnomalyIds.join(', ') || 'none'}`,
+      debugForcedAnomalyId ? `Forced: ${debugForcedAnomalyId}` : 'Forced: off',
       state.currentAnomalyId
         ? `Rule anomaly: ${ruleAnomaly?.label ?? state.currentAnomalyId} (${state.currentAnomalyId})`
         : 'Rule anomaly: none',
@@ -742,6 +827,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
         : '',
       formatTransitionTuning(transitionTuning),
       'Debug tuning: C commit, V sign, R reset',
+      'Debug anomaly: X cycle, Z clean, O clear, P period 0',
       debugNotice ? `Last: ${debugNotice}` : ''
     ].filter(Boolean).join('\n');
   }
@@ -943,6 +1029,18 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   function pulseScreenDistortion(amount: number): void {
     transitionVisualPulse = Math.max(transitionVisualPulse, amount);
+  }
+
+  function getWalkerAnomalyMode(anomalyId: GameState['currentAnomalyId']): WalkerAnomalyMode {
+    if (anomalyId === 'man-staring') {
+      return 'staring';
+    }
+
+    if (anomalyId === 'man-face-missing') {
+      return 'faceMissing';
+    }
+
+    return 'normal';
   }
 
   function renderFrame(): void {
@@ -1177,10 +1275,15 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
           ? { x: roundForText(queuedLocal.x), z: roundForText(queuedLocal.z) }
           : null,
         loopIndex: state.loopIndex,
+        period: state.loopIndex,
         targetLoops: state.targetLoops,
         anomaly: state.currentAnomalyId,
         visualAnomaly: currentHallwayState.currentAnomalyId,
         queuedAnomaly: nextHallway?.state.currentAnomalyId ?? null,
+        encounterChance: roundForText(state.encounterChance),
+        encounterRoll: roundForText(state.encounterRoll),
+        recentAnomalyIds: state.recentAnomalyIds,
+        debugForcedAnomaly: debugForcedAnomalyId,
         timedThreat: activeTimedAnomalyId
           ? {
               id: activeTimedAnomalyId,

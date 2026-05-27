@@ -19,6 +19,13 @@ export interface TransformSnapshot {
   scale: THREE.Vector3;
 }
 
+export interface PosterEyeHandle {
+  mesh: THREE.Mesh;
+  poster: THREE.Group;
+  baseX: number;
+  baseY: number;
+}
+
 export interface HallwayHandles {
   root: THREE.Group;
   environmentMaterials: EnvironmentMaterials;
@@ -28,10 +35,15 @@ export interface HallwayHandles {
   lockerDoor: THREE.Object3D;
   lockerInterior: THREE.Mesh;
   lockerInteriorMaterial: THREE.MeshStandardMaterial;
+  lockerMissingTargets: THREE.Object3D[];
   clockHourPivot: THREE.Object3D;
   clockMinutePivot: THREE.Object3D;
   clockSecondPivot: THREE.Object3D;
   clockSecondMaterial: THREE.MeshStandardMaterial;
+  doorLabelWrong: THREE.Mesh;
+  doorHandleCentered: THREE.Group;
+  ceilingStainFace: THREE.Mesh;
+  floorExtraTile: THREE.Mesh;
   ventCover: THREE.Object3D;
   ventDarkness: THREE.Mesh;
   flickerLight: THREE.RectAreaLight;
@@ -41,6 +53,8 @@ export interface HallwayHandles {
   fluorescentSparkGroups: THREE.Group[];
   mismatchTile: THREE.Mesh;
   bulletinBoardTexture: THREE.CanvasTexture;
+  posterEyeTrackers: PosterEyeHandle[];
+  posterFaceWrongOverlay: THREE.Mesh;
   hallwayFigure: THREE.Group;
   hallwayFigureHead: THREE.Object3D;
   hallwayFigureFaceMaterial: THREE.MeshStandardMaterial;
@@ -90,6 +104,7 @@ type ModelFitAxis = 'x' | 'y' | 'z';
 
 interface ModelPlacementOptions {
   fitSize?: THREE.Vector3;
+  stretchSize?: THREE.Vector3;
   fitAxes?: ModelFitAxis[];
   center?: THREE.Vector3;
   rotation?: THREE.Euler;
@@ -192,6 +207,7 @@ const textureCache = new Map<string, THREE.Texture>();
 const modelCache = new Map<string, Promise<THREE.Group>>();
 let chalkNumberFontLoaded = false;
 let chalkNumberFontPromise: Promise<void> | null = null;
+let sparkAlphaTexture: THREE.CanvasTexture | null = null;
 
 interface ShellOptions {
   walkableRects: BoundsRect[];
@@ -299,7 +315,7 @@ function applyModelPlacement(instance: THREE.Object3D, placement?: ModelPlacemen
     instance.rotation.copy(placement.rotation);
   }
 
-  if (!placement.fitSize && !placement.center) {
+  if (!placement.fitSize && !placement.stretchSize && !placement.center) {
     return;
   }
 
@@ -309,7 +325,17 @@ function applyModelPlacement(instance: THREE.Object3D, placement?: ModelPlacemen
     return;
   }
 
-  if (placement.fitSize) {
+  if (placement.stretchSize) {
+    const currentSize = bounds.getSize(new THREE.Vector3());
+    const stretchScale = new THREE.Vector3(
+      currentSize.x > 0 ? placement.stretchSize.x / currentSize.x : 1,
+      currentSize.y > 0 ? placement.stretchSize.y / currentSize.y : 1,
+      currentSize.z > 0 ? placement.stretchSize.z / currentSize.z : 1
+    );
+    instance.scale.multiply(stretchScale);
+    instance.updateMatrixWorld(true);
+    bounds.setFromObject(instance);
+  } else if (placement.fitSize) {
     const currentSize = bounds.getSize(new THREE.Vector3());
     const axes = placement.fitAxes ?? ['x', 'y', 'z'];
     const scale = axes.reduce((best, axis) => {
@@ -1145,25 +1171,54 @@ function addFluorescentSparks(
   group.visible = false;
   root.add(group);
 
-  for (let index = 0; index < 9; index += 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: index % 3 === 0 ? 0x8fe8ff : 0xffd38a,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending
-    });
-    const spark = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.001, 0.22 + (index % 3) * 0.06, 6), material);
-    spark.name = `spark-${index}`;
-    spark.userData.seed = lightIndex * 19 + index * 7;
-    group.add(spark);
-  }
+  const particleCount = 28;
+  const positions = new Float32Array(particleCount * 3);
+  const sparkGeometry = new THREE.BufferGeometry();
+  sparkGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const sparkMaterial = new THREE.PointsMaterial({
+    color: 0xffcf7a,
+    map: getSparkAlphaTexture(),
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    size: 0.055,
+    sizeAttenuation: true
+  });
+  const sparks = new THREE.Points(sparkGeometry, sparkMaterial);
+  sparks.name = 'spark-particle-pool';
+  sparks.userData.seed = lightIndex * 19;
+  group.add(sparks);
 
   const flash = new THREE.PointLight(0xffd69a, 0, 1.5, 2);
   flash.name = 'spark-flash-light';
   group.add(flash);
 
   return group;
+}
+
+function getSparkAlphaTexture(): THREE.CanvasTexture {
+  if (sparkAlphaTexture) {
+    return sparkAlphaTexture;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create spark alpha texture.');
+  }
+
+  const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 31);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.28, 'rgba(255,255,255,0.82)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 64, 64);
+  sparkAlphaTexture = new THREE.CanvasTexture(canvas);
+  sparkAlphaTexture.needsUpdate = true;
+  return sparkAlphaTexture;
 }
 
 function addProps(
@@ -1186,6 +1241,9 @@ function addProps(
   const cameraHandles = addSecurityCamera(root, snapshots);
   const ventHandles = addVent(root, snapshots);
   const anomalyTile = addMismatchTile(root);
+  const floorExtraTile = addFloorExtraTile(root);
+  const doorAnomalyHandles = addClassroomDoors(root);
+  const ceilingStainFace = addCeilingStainFace(root);
   const bulletinBoardHandles = addBulletinBoard(root);
   const hallwayFigureHandles = addHallwayFigure(root, snapshots);
   const redFloodHandles = addRedFlood(root);
@@ -1200,18 +1258,21 @@ function addProps(
     position: getTransitionSignPosition(1),
     rotationY: getTransitionSignRotation(1)
   });
-  addClassroomDoors(root);
-  addMotivationalPoster(root);
+  const posterHandles = addPosterSeries(root);
 
   return {
     ...lockerHandles,
     ...clockHandles,
     ...cameraHandles,
     ...ventHandles,
+    ...doorAnomalyHandles,
     ...bulletinBoardHandles,
+    ...posterHandles,
     ...hallwayFigureHandles,
     ...redFloodHandles,
     mismatchTile: anomalyTile,
+    floorExtraTile,
+    ceilingStainFace,
     exitGlow,
     transitionSigns: {
       negative: negativeTransitionSign,
@@ -1228,7 +1289,7 @@ function getTransitionSignRotation(side: TransitionSignSide): number {
   return side * Math.PI / 2;
 }
 
-function addClassroomDoors(root: THREE.Group): void {
+function addClassroomDoors(root: THREE.Group): Pick<HallwayHandles, 'doorLabelWrong' | 'doorHandleCentered'> {
   const doorMaterial = createWoodMaterial(0xcabca5);
   const doorFrameMaterial = createCleanMetalMaterial(0x9a9087, 0.22);
   const darkRoomMaterial = new THREE.MeshStandardMaterial({
@@ -1274,6 +1335,8 @@ function addClassroomDoors(root: THREE.Group): void {
     glassMaterial,
     handleMaterial
   });
+
+  return addDoorAnomalyOverlays(root, handleMaterial);
 }
 
 interface ClassroomDoorOptions {
@@ -1305,6 +1368,38 @@ function addImportedClassroomDoor(root: THREE.Group, options: ClassroomDoorOptio
     fitAxes: ['x', 'y'],
     center: new THREE.Vector3(0, 1.18, 0.01)
   });
+}
+
+function addDoorAnomalyOverlays(
+  root: THREE.Group,
+  handleMaterial: THREE.Material
+): Pick<HallwayHandles, 'doorLabelWrong' | 'doorHandleCentered'> {
+  const labelMaterial = new THREE.MeshStandardMaterial({
+    map: createDoorLabelTexture('109'),
+    roughness: 0.65,
+    metalness: 0.01,
+    transparent: true
+  });
+  const doorLabelWrong = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.15), labelMaterial);
+  doorLabelWrong.name = 'classroom-door-wrong-label-overlay';
+  doorLabelWrong.position.set(POSITIVE_WALL_FACE_X - 0.018, 1.96, 4.64);
+  doorLabelWrong.rotation.y = -Math.PI / 2;
+  doorLabelWrong.visible = false;
+  root.add(doorLabelWrong);
+
+  const doorHandleCentered = new THREE.Group();
+  doorHandleCentered.name = 'classroom-door-centered-handle-overlay';
+  doorHandleCentered.position.set(POSITIVE_WALL_FACE_X - 0.04, 1.0, 4.95);
+  doorHandleCentered.rotation.y = -Math.PI / 2;
+  doorHandleCentered.visible = false;
+  root.add(doorHandleCentered);
+  addBox(doorHandleCentered, 'centered-handle-knob', [0.07, 0.07, 0.07], [0, 0, 0], handleMaterial);
+  addBox(doorHandleCentered, 'centered-handle-plate', [0.025, 0.24, 0.014], [0, 0, -0.052], handleMaterial);
+
+  return {
+    doorLabelWrong,
+    doorHandleCentered
+  };
 }
 
 function addClassroomDoor(root: THREE.Group, options: ClassroomDoorOptions): void {
@@ -1525,8 +1620,8 @@ function createLevelSignNumberTexture(): THREE.CanvasTexture {
   canvas.height = TRANSITION_SIGN_CANVAS_HEIGHT;
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  ensureChalkNumberFontLoaded(() => paintLevelSignNumber(texture, 1, 8, false, 'idle'));
-  paintLevelSignNumber(texture, 1, 8, false, 'idle');
+  ensureChalkNumberFontLoaded(() => paintLevelSignNumber(texture, 0, 8, false, 'idle'));
+  paintLevelSignNumber(texture, 0, 8, false, 'idle');
   return texture;
 }
 
@@ -1543,7 +1638,7 @@ function paintLevelSignNumber(
     throw new Error('Could not create level sign canvas context.');
   }
 
-  const count = isEscaped ? targetLoops : THREE.MathUtils.clamp(level, 1, targetLoops);
+  const count = isEscaped ? targetLoops : THREE.MathUtils.clamp(level, 0, targetLoops);
   const color = outcome === 'wrong' ? '219, 205, 194' : '224, 221, 205';
   const seed = count * 97 + targetLoops * 13 + (outcome === 'wrong' ? 19 : 0);
   context.clearRect(0, 0, canvas.width, canvas.height);
@@ -1679,39 +1774,172 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-function addMotivationalPoster(root: THREE.Group): void {
-  const posterTexture = new THREE.TextureLoader().load('/textures/you-can-do-it-poster.png');
-  posterTexture.colorSpace = THREE.SRGBColorSpace;
-  const posterMaterial = new THREE.MeshStandardMaterial({
-    map: posterTexture,
-    roughness: 0.74,
-    metalness: 0.01
-  });
+const POSTER_SERIES = [
+  {
+    name: 'poster-expand-mind',
+    texture: '/textures/posters/expand-mind.png',
+    wall: -1,
+    z: 1.0
+  },
+  {
+    name: 'poster-learn-together',
+    texture: '/textures/posters/learn-together.png',
+    wall: -1,
+    z: 2.35,
+    faceWrong: true
+  },
+  {
+    name: 'poster-write-learn-succeed',
+    texture: '/textures/posters/write-learn-succeed.png',
+    wall: -1,
+    z: 3.7
+  },
+  {
+    name: 'poster-dont-be-afraid',
+    texture: '/textures/posters/dont-be-afraid.png',
+    wall: -1,
+    z: 5.05,
+    eyes: [
+      { x: -0.043, y: 0.034 },
+      { x: -0.005, y: 0.035 }
+    ]
+  },
+  {
+    name: 'poster-dream-big',
+    texture: '/textures/posters/dream-big.png',
+    wall: -1,
+    z: 6.4
+  },
+  {
+    name: 'poster-hallway-expectations',
+    texture: '/textures/posters/hallway-expectations.png',
+    wall: 1,
+    z: -4.65
+  }
+] as const;
+
+const POSTER_SCALE = 1.7;
+const POSTER_WIDTH = 0.54 * POSTER_SCALE;
+const POSTER_HEIGHT = 0.81 * POSTER_SCALE;
+
+function addPosterSeries(root: THREE.Group): Pick<HallwayHandles, 'posterEyeTrackers' | 'posterFaceWrongOverlay'> {
   const frameMaterial = new THREE.MeshStandardMaterial({
     color: 0xc9b48b,
     roughness: 0.58,
     metalness: 0.04
   });
-
-  const poster = new THREE.Group();
-  poster.name = 'you-can-do-it-poster';
-  poster.position.set(NEGATIVE_WALL_FACE_X, 1.48, 0.65);
-  poster.rotation.y = Math.PI / 2;
-  root.add(poster);
-
-  const board = new THREE.Mesh(new THREE.PlaneGeometry(0.82, 1.08), posterMaterial);
-  board.position.z = 0.018;
-  poster.add(board);
-
-  addRectangularFrame(poster, 'poster-frame', {
-    outerWidth: 0.9,
-    outerHeight: 1.16,
-    thickness: 0.04,
-    depth: 0.03,
-    bottom: -0.58,
-    z: 0,
-    material: frameMaterial
+  const posterEyeTrackers: PosterEyeHandle[] = [];
+  const hiddenMaterial = new THREE.MeshStandardMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0
   });
+  let posterFaceWrongOverlay = new THREE.Mesh(new THREE.PlaneGeometry(0.01, 0.01), hiddenMaterial);
+  posterFaceWrongOverlay.name = 'poster-face-wrong-overlay-unused';
+  posterFaceWrongOverlay.visible = false;
+
+  for (const spec of POSTER_SERIES) {
+    const posterTexture = loadPosterTexture(spec.texture);
+    const posterMaterial = new THREE.MeshStandardMaterial({
+      map: posterTexture,
+      roughness: 0.76,
+      metalness: 0.01
+    });
+    const poster = new THREE.Group();
+    poster.name = spec.name;
+    poster.position.set(spec.wall < 0 ? NEGATIVE_WALL_FACE_X : POSITIVE_WALL_FACE_X, 1.58, spec.z);
+    poster.rotation.y = spec.wall < 0 ? Math.PI / 2 : -Math.PI / 2;
+    root.add(poster);
+
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(POSTER_WIDTH, POSTER_HEIGHT), posterMaterial);
+    board.name = `${spec.name}-print`;
+    board.position.z = 0.018;
+    poster.add(board);
+
+    addRectangularFrame(poster, `${spec.name}-frame`, {
+      outerWidth: POSTER_WIDTH + 0.09,
+      outerHeight: POSTER_HEIGHT + 0.09,
+      thickness: 0.036,
+      depth: 0.03,
+      bottom: -POSTER_HEIGHT / 2 - 0.045,
+      z: 0,
+      material: frameMaterial
+    });
+
+    if ('eyes' in spec) {
+      for (const eye of spec.eyes) {
+        const pupil = new THREE.Mesh(
+          new THREE.CircleGeometry(0.016, 18),
+          new THREE.MeshStandardMaterial({
+            color: 0x142b63,
+            roughness: 0.68,
+            metalness: 0.01
+          })
+        );
+        pupil.name = `${spec.name}-tracking-pupil`;
+        pupil.position.set(eye.x * POSTER_SCALE, eye.y * POSTER_SCALE, 0.034);
+        pupil.scale.setScalar(POSTER_SCALE);
+        pupil.visible = false;
+        poster.add(pupil);
+        posterEyeTrackers.push({
+          mesh: pupil,
+          poster,
+          baseX: eye.x * POSTER_SCALE,
+          baseY: eye.y * POSTER_SCALE
+        });
+      }
+    }
+
+    if ('faceWrong' in spec) {
+      const faceTexture = loadPosterTexture(spec.texture);
+      faceTexture.repeat.set(0.62, 0.22);
+      faceTexture.offset.set(0.2, 0.4);
+      const faceWrongMaterial = new THREE.MeshStandardMaterial({
+        map: faceTexture,
+        roughness: 0.8,
+        metalness: 0.01,
+        transparent: true,
+        opacity: 0.93
+      });
+      posterFaceWrongOverlay = new THREE.Mesh(
+        createWarpedPosterPatchGeometry(0.43 * POSTER_SCALE, 0.22 * POSTER_SCALE),
+        faceWrongMaterial
+      );
+      posterFaceWrongOverlay.name = 'poster-face-wrong-overlay';
+      posterFaceWrongOverlay.position.set(0.02 * POSTER_SCALE, 0.065 * POSTER_SCALE, 0.038);
+      posterFaceWrongOverlay.rotation.z = THREE.MathUtils.degToRad(-1.8);
+      posterFaceWrongOverlay.visible = false;
+      poster.add(posterFaceWrongOverlay);
+    }
+  }
+
+  return {
+    posterEyeTrackers,
+    posterFaceWrongOverlay
+  };
+}
+
+function loadPosterTexture(path: string): THREE.Texture {
+  const texture = new THREE.TextureLoader().load(path);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function createWarpedPosterPatchGeometry(width: number, height: number): THREE.PlaneGeometry {
+  const geometry = new THREE.PlaneGeometry(width, height, 8, 5);
+  const position = geometry.attributes.position;
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    position.setXY(
+      index,
+      x + Math.sin((y / height + 0.5) * Math.PI * 3) * 0.013,
+      y + Math.sin((x / width + 0.5) * Math.PI * 4) * 0.009
+    );
+  }
+  position.needsUpdate = true;
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 function addBulletinBoard(root: THREE.Group): Pick<HallwayHandles, 'bulletinBoardTexture'> {
@@ -1780,10 +2008,10 @@ function paintBulletinBoardTexture(texture: THREE.CanvasTexture, isWarning: bool
   }
 
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = isWarning ? '#6f2720' : '#b9854f';
+  context.fillStyle = isWarning ? '#9b7048' : '#b9854f';
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.globalAlpha = isWarning ? 0.32 : 0.18;
-  context.strokeStyle = isWarning ? '#210807' : '#6d4729';
+  context.strokeStyle = isWarning ? '#533018' : '#6d4729';
   context.lineWidth = 3;
   for (let y = 18; y < canvas.height; y += 42) {
     context.beginPath();
@@ -1803,14 +2031,6 @@ function paintBulletinBoardTexture(texture: THREE.CanvasTexture, isWarning: bool
 
   for (const [index, note] of notes.entries()) {
     drawBulletinNote(context, note.x, note.y, note.w, note.h, note.color, note.rot, index, isWarning);
-  }
-
-  if (isWarning) {
-    context.fillStyle = 'rgba(44, 5, 3, 0.82)';
-    context.font = '900 86px Arial, sans-serif';
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText('TURN BACK', canvas.width / 2, canvas.height / 2 + 8);
   }
 
   texture.needsUpdate = true;
@@ -1836,15 +2056,17 @@ function drawBulletinNote(
   context.lineWidth = 5;
   context.strokeRect(-width / 2, -height / 2, width, height);
 
-  context.fillStyle = isWarning ? '#3a0805' : '#27313b';
+  context.fillStyle = isWarning ? '#27313b' : '#27313b';
   context.textAlign = 'left';
   context.textBaseline = 'top';
   context.font = `800 ${isWarning ? 34 : 28}px Arial, sans-serif`;
-  const headline = isWarning ? 'TURN BACK' : ['TRYOUTS', 'MATH CLUB', 'LOST KEYS', 'CAFETERIA', 'FIELD TRIP'][index];
+  const headline = isWarning
+    ? ['PERIOD 0', 'ROOM 000', 'NO CLUB', 'MONDAY?', 'FIELD TRIP'][index]
+    : ['TRYOUTS', 'MATH CLUB', 'LOST KEYS', 'CAFETERIA', 'FIELD TRIP'][index];
   context.fillText(headline, -width / 2 + 24, -height / 2 + 22);
 
-  context.lineWidth = isWarning ? 7 : 4;
-  context.strokeStyle = isWarning ? 'rgba(58, 8, 5, 0.78)' : 'rgba(39, 49, 59, 0.42)';
+  context.lineWidth = isWarning ? 5 : 4;
+  context.strokeStyle = isWarning ? 'rgba(39, 49, 59, 0.48)' : 'rgba(39, 49, 59, 0.42)';
   const lineCount = isWarning ? 4 : 5;
   for (let line = 0; line < lineCount; line += 1) {
     const lineY = -height / 2 + 78 + line * 28;
@@ -2195,10 +2417,15 @@ function pseudoUnit(seed: number): number {
   return ((Math.sin(seed) * 43758.5453) % 1 + 1) % 1;
 }
 
+const LOCKER_COUNT = 9;
+const LOCKER_SPACING_Z = 0.56;
+const LOCKER_ROW_CENTER_Z = 0.45;
+const MISSING_LOCKER_INDEX = 4;
+
 function addLockers(
   root: THREE.Group,
   snapshots: Map<THREE.Object3D, TransformSnapshot>
-): Pick<HallwayHandles, 'lockerDoor' | 'lockerInterior' | 'lockerInteriorMaterial'> {
+): Pick<HallwayHandles, 'lockerDoor' | 'lockerInterior' | 'lockerInteriorMaterial' | 'lockerMissingTargets'> {
   const lockerGroup = new THREE.Group();
   lockerGroup.name = 'lockers';
   root.add(lockerGroup);
@@ -2212,16 +2439,34 @@ function addLockers(
     roughness: 1
   });
 
-  const fallback = new THREE.Group();
-  fallback.name = 'lockers-procedural-fallback';
-  lockerGroup.add(fallback);
+  const lockerMissingTargets: THREE.Object3D[] = [];
 
-  for (let index = 0; index < 3; index += 1) {
-    const z = 2.85 - index * 0.82;
-    addBox(fallback, `locker-body-${index}`, [0.48, 1.62, 0.72], [MAIN_HALF_WIDTH - 0.28, 0.86, z], bodyMaterial);
-    if (index !== 1) {
-      addBox(fallback, `locker-door-${index}`, [0.045, 1.45, 0.61], [MAIN_HALF_WIDTH - 0.57, 0.93, z], doorMaterial);
-      addBox(fallback, `locker-handle-${index}`, [0.04, 0.18, 0.035], [MAIN_HALF_WIDTH - 0.61, 1.05, z - 0.21], handleMaterial);
+  for (let lockerIndex = 0; lockerIndex < LOCKER_COUNT; lockerIndex += 1) {
+    const lockerCell = new THREE.Group();
+    lockerCell.name = `locker-${lockerIndex}`;
+    lockerCell.position.set(
+      MAIN_HALF_WIDTH - 0.25,
+      0,
+      LOCKER_ROW_CENTER_Z + (lockerIndex - (LOCKER_COUNT - 1) / 2) * LOCKER_SPACING_Z
+    );
+    lockerGroup.add(lockerCell);
+
+    const fallback = new THREE.Group();
+    fallback.name = `${lockerCell.name}-procedural-fallback`;
+    lockerCell.add(fallback);
+    addSingleLockerFallback(fallback, lockerCell.name, bodyMaterial, doorMaterial, handleMaterial);
+
+    const importedLocker = new THREE.Group();
+    importedLocker.name = `${lockerCell.name}-imported`;
+    lockerCell.add(importedLocker);
+    loadModelInto(`${MODEL_ROOT}/school-locker.glb`, importedLocker, fallback, {
+      rotation: new THREE.Euler(0, Math.PI / 2, 0),
+      stretchSize: new THREE.Vector3(0.42, 1.82, 0.5),
+      center: new THREE.Vector3(0, 0.94, 0)
+    });
+
+    if (lockerIndex === MISSING_LOCKER_INDEX) {
+      lockerMissingTargets.push(lockerCell);
     }
   }
 
@@ -2255,24 +2500,37 @@ function addLockers(
     );
   }
 
-  const importedBank = new THREE.Group();
-  importedBank.name = 'locker-bank-imported';
-  importedBank.position.set(MAIN_HALF_WIDTH - 0.28, 0, 2.03);
-  lockerGroup.add(importedBank);
-
-  loadModelInto(`${MODEL_ROOT}/locker-bank.glb`, importedBank, fallback, {
-    rotation: new THREE.Euler(-Math.PI / 2, Math.PI / 2, 0),
-    fitSize: new THREE.Vector3(0.48, 1.86, 1.48),
-    fitAxes: ['y', 'z'],
-    center: new THREE.Vector3(0, 0.96, 0)
-  });
   snapshotTransform(anomalyDoor, snapshots);
 
   return {
     lockerDoor: anomalyDoor,
     lockerInterior,
-    lockerInteriorMaterial
+    lockerInteriorMaterial,
+    lockerMissingTargets
   };
+}
+
+function addSingleLockerFallback(
+  parent: THREE.Group,
+  name: string,
+  bodyMaterial: THREE.Material,
+  doorMaterial: THREE.Material,
+  handleMaterial: THREE.Material
+): void {
+  addBox(parent, `${name}-fallback-body`, [0.42, 1.66, 0.5], [0, 0.86, 0], bodyMaterial);
+  addBox(parent, `${name}-fallback-door`, [0.045, 1.48, 0.42], [-0.23, 0.92, 0], doorMaterial);
+  addBox(parent, `${name}-fallback-handle`, [0.04, 0.18, 0.028], [-0.265, 1.03, -0.16], handleMaterial);
+  for (let index = 0; index < 4; index += 1) {
+    addBox(
+      parent,
+      `${name}-fallback-vent-${index}`,
+      [0.014, 0.012, 0.16],
+      [-0.268, 1.34 - index * 0.055, 0.05],
+      handleMaterial,
+      false,
+      false
+    );
+  }
 }
 
 function addClock(
@@ -2517,6 +2775,78 @@ function addMismatchTile(root: THREE.Group): THREE.Mesh {
   tile.visible = false;
   root.add(tile);
   return tile;
+}
+
+function addFloorExtraTile(root: THREE.Group): THREE.Mesh {
+  const tile = new THREE.Mesh(
+    new THREE.BoxGeometry(1.08, 0.012, 0.34),
+    new THREE.MeshStandardMaterial({
+      color: 0xdedfd8,
+      roughness: 0.9,
+      metalness: 0.01
+    })
+  );
+  tile.name = 'extra-floor-tile-strip';
+  tile.position.set(-0.38, 0.012, -1.35);
+  tile.receiveShadow = true;
+  tile.visible = false;
+  root.add(tile);
+  return tile;
+}
+
+function addCeilingStainFace(root: THREE.Group): THREE.Mesh {
+  const texture = createCeilingStainTexture();
+  const stain = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.35, 0.82),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.58,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  stain.name = 'ceiling-stain-face';
+  stain.position.set(-0.22, CEILING_SURFACE_Y - 0.018, -5.45);
+  stain.rotation.x = Math.PI / 2;
+  stain.visible = false;
+  root.add(stain);
+  return stain;
+}
+
+function createCeilingStainTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 320;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not create ceiling stain canvas context.');
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  const stainGradient = context.createRadialGradient(256, 160, 22, 256, 160, 210);
+  stainGradient.addColorStop(0, 'rgba(74, 65, 50, 0.32)');
+  stainGradient.addColorStop(0.48, 'rgba(83, 75, 58, 0.18)');
+  stainGradient.addColorStop(1, 'rgba(83, 75, 58, 0)');
+  context.fillStyle = stainGradient;
+  context.beginPath();
+  context.ellipse(256, 160, 210, 104, -0.08, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = 'rgba(35, 30, 25, 0.28)';
+  context.beginPath();
+  context.ellipse(202, 142, 18, 10, -0.18, 0, Math.PI * 2);
+  context.ellipse(309, 142, 18, 10, 0.18, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = 'rgba(36, 30, 25, 0.24)';
+  context.lineWidth = 9;
+  context.beginPath();
+  context.arc(256, 180, 54, 0.18, Math.PI - 0.18);
+  context.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function addExitGlow(root: THREE.Group): THREE.Mesh {

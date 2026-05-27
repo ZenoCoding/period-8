@@ -15,7 +15,7 @@ describe('transition controller', () => {
     expect(activeTransition.phase).toBe('preCommit');
     expect(activeTransition.choice).toBe('forward');
     expect(activeTransition.committedState).toBeUndefined();
-    expect(state.loopIndex).toBe(1);
+    expect(state.loopIndex).toBe(0);
     expect(state.streak).toBe(0);
   });
 
@@ -29,9 +29,9 @@ describe('transition controller', () => {
     const postCommit = markTransitionPostCommit(commit.activeTransition);
 
     expect(commit.result.wasCorrect).toBe(true);
-    expect(commit.state.loopIndex).toBe(2);
+    expect(commit.state.loopIndex).toBe(1);
     expect(commit.state.streak).toBe(1);
-    expect(commit.signCount).toBe(2);
+    expect(commit.signCount).toBe(1);
     expect(postCommit.phase).toBe('postCommit');
   });
 
@@ -39,7 +39,7 @@ describe('transition controller', () => {
     const anomalous: GameState = {
       ...createInitialGameState(),
       loopIndex: 2,
-      currentAnomalyId: 'locker-ajar',
+      currentAnomalyId: 'locker-count-missing',
       expectedAction: 'backward'
     };
     const activeTransition = beginTransition(1);
@@ -66,9 +66,9 @@ describe('transition controller', () => {
 
     expect(commit.shouldReset).toBe(true);
     expect(commit.activeTransition.phase).toBe('resetting');
-    expect(commit.state.loopIndex).toBe(1);
+    expect(commit.state.loopIndex).toBe(0);
     expect(commit.state.streak).toBe(0);
-    expect(commit.signCount).toBe(1);
+    expect(commit.signCount).toBe(0);
   });
 
   it('does not derive sign state before commit', () => {

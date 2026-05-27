@@ -9,15 +9,17 @@ describe('hallway loop simulation', () => {
     const result = resolvePortalTransition(initial, 'forward');
 
     expect(result.wasCorrect).toBe(true);
-    expect(result.state.loopIndex).toBe(2);
+    expect(initial.loopIndex).toBe(0);
+    expect(result.state.loopIndex).toBe(1);
     expect(result.state.failCount).toBe(0);
+    expect(result.state.encounterHistory).toHaveLength(2);
   });
 
   it('advances when an anomalous hallway is exited backward', () => {
     const anomalous: GameState = {
       ...createInitialGameState(),
       loopIndex: 2,
-      currentAnomalyId: 'locker-ajar',
+      currentAnomalyId: 'locker-count-missing',
       expectedAction: 'backward'
     };
 
@@ -40,7 +42,7 @@ describe('hallway loop simulation', () => {
     const result = resolvePortalTransition(anomalous, 'forward');
 
     expect(result.wasCorrect).toBe(false);
-    expect(result.state.loopIndex).toBe(1);
+    expect(result.state.loopIndex).toBe(0);
     expect(result.state.failCount).toBe(1);
     expect(result.state.ambienceLevel).toBe(3);
     expect(result.state.lastOutcome).toBe('wrong');
@@ -49,7 +51,7 @@ describe('hallway loop simulation', () => {
   it('escapes after the target loop is completed correctly', () => {
     const finalLoop: GameState = {
       ...createInitialGameState(),
-      loopIndex: 8,
+      loopIndex: 7,
       targetLoops: 8,
       currentAnomalyId: null,
       expectedAction: 'forward'
@@ -58,6 +60,7 @@ describe('hallway loop simulation', () => {
     const result = resolvePortalTransition(finalLoop, 'forward');
 
     expect(result.wasCorrect).toBe(true);
+    expect(result.state.loopIndex).toBe(8);
     expect(result.state.phase).toBe('escaped');
     expect(result.state.lastOutcome).toBe('escaped');
   });
@@ -74,10 +77,25 @@ describe('hallway loop simulation', () => {
 
     const result = resolveTimedAnomalyTimeout(threatened);
 
-    expect(result.loopIndex).toBe(1);
+    expect(result.loopIndex).toBe(0);
     expect(result.failCount).toBe(1);
     expect(result.ambienceLevel).toBe(2);
     expect(result.streak).toBe(0);
     expect(result.lastOutcome).toBe('wrong');
+  });
+
+  it('preserves recent anomaly history across resets', () => {
+    const anomalous: GameState = {
+      ...createInitialGameState(),
+      loopIndex: 4,
+      currentAnomalyId: 'clock-wrong',
+      expectedAction: 'backward',
+      recentAnomalyIds: ['clock-wrong', 'vent-open', 'yellow-lights']
+    };
+
+    const result = resolvePortalTransition(anomalous, 'forward');
+
+    expect(result.state.loopIndex).toBe(0);
+    expect(result.state.recentAnomalyIds).toEqual(['clock-wrong', 'vent-open', 'yellow-lights']);
   });
 });

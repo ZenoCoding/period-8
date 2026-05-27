@@ -1,4 +1,4 @@
-import { pickEncounterForLoop } from './anomalies';
+import { selectEncounterForPeriod, type EncounterSelection } from './anomalies';
 import type { DirectionChoice, GameState, TransitionResult } from './types';
 
 const DEFAULT_TARGET_LOOPS = 8;
@@ -9,14 +9,20 @@ export function expectedActionForAnomaly(currentAnomalyId: GameState['currentAno
 }
 
 export function createInitialGameState(targetLoops = DEFAULT_TARGET_LOOPS): GameState {
-  const currentAnomalyId = pickEncounterForLoop(1);
+  const selection = selectEncounterForPeriod({ periodIndex: 0 });
+  const currentAnomalyId = selection.anomalyId;
 
   return {
-    loopIndex: 1,
+    loopIndex: 0,
     targetLoops,
     currentAnomalyId,
     expectedAction: expectedActionForAnomaly(currentAnomalyId),
     failCount: 0,
+    encounterChance: selection.chance,
+    encounterRoll: selection.roll,
+    encounterHistory: [currentAnomalyId],
+    recentAnomalyIds: [],
+    usedAnomalyCounts: {},
     ambienceLevel: 0,
     streak: 0,
     phase: 'playing',
@@ -41,21 +47,7 @@ export function resolvePortalTransition(state: GameState, choice: DirectionChoic
   const wasCorrect = choice === expectedAction;
 
   if (!wasCorrect) {
-    const failCount = state.failCount + 1;
-    const ambienceLevel = Math.min(MAX_AMBIENCE_LEVEL, state.ambienceLevel + 1);
-    const currentAnomalyId = pickEncounterForLoop(1, failCount);
-    const nextState: GameState = {
-      ...state,
-      loopIndex: 1,
-      currentAnomalyId,
-      expectedAction: expectedActionForAnomaly(currentAnomalyId),
-      failCount,
-      ambienceLevel,
-      streak: 0,
-      phase: 'playing',
-      lastOutcome: 'wrong',
-      lastMessage: 'The hallway rejects that choice.'
-    };
+    const nextState = createResetState(state, 'The hallway rejects that choice.');
 
     return {
       state: nextState,
@@ -67,9 +59,10 @@ export function resolvePortalTransition(state: GameState, choice: DirectionChoic
     };
   }
 
-  if (state.loopIndex >= state.targetLoops) {
+  if (state.loopIndex >= state.targetLoops - 1) {
     const nextState: GameState = {
       ...state,
+      loopIndex: state.targetLoops,
       currentAnomalyId: null,
       expectedAction: 'forward',
       streak: state.streak + 1,
@@ -89,12 +82,15 @@ export function resolvePortalTransition(state: GameState, choice: DirectionChoic
   }
 
   const loopIndex = state.loopIndex + 1;
-  const currentAnomalyId = pickEncounterForLoop(loopIndex, state.failCount);
+  const selection = selectEncounterForPeriod({
+    periodIndex: loopIndex,
+    failCount: state.failCount,
+    encounterHistory: state.encounterHistory,
+    recentAnomalyIds: state.recentAnomalyIds,
+    usedAnomalyCounts: state.usedAnomalyCounts
+  });
   const nextState: GameState = {
-    ...state,
-    loopIndex,
-    currentAnomalyId,
-    expectedAction: expectedActionForAnomaly(currentAnomalyId),
+    ...applyEncounterSelection(state, loopIndex, selection),
     streak: state.streak + 1,
     lastOutcome: 'correct',
     lastMessage: 'The corridor repeats.'
@@ -111,20 +107,61 @@ export function resolvePortalTransition(state: GameState, choice: DirectionChoic
 }
 
 export function resolveTimedAnomalyTimeout(state: GameState): GameState {
+  return createResetState(state, 'The hallway caught you.');
+}
+
+function createResetState(state: GameState, lastMessage: string): GameState {
   const failCount = state.failCount + 1;
   const ambienceLevel = Math.min(MAX_AMBIENCE_LEVEL, state.ambienceLevel + 1);
-  const currentAnomalyId = pickEncounterForLoop(1, failCount);
+  const selection = selectEncounterForPeriod({
+    periodIndex: 0,
+    failCount,
+    recentAnomalyIds: state.recentAnomalyIds,
+    usedAnomalyCounts: state.usedAnomalyCounts
+  });
 
   return {
     ...state,
-    loopIndex: 1,
-    currentAnomalyId,
-    expectedAction: expectedActionForAnomaly(currentAnomalyId),
+    loopIndex: 0,
+    currentAnomalyId: selection.anomalyId,
+    expectedAction: expectedActionForAnomaly(selection.anomalyId),
     failCount,
+    encounterChance: selection.chance,
+    encounterRoll: selection.roll,
+    encounterHistory: [selection.anomalyId],
     ambienceLevel,
     streak: 0,
     phase: 'playing',
     lastOutcome: 'wrong',
-    lastMessage: 'The hallway caught you.'
+    lastMessage
+  };
+}
+
+function applyEncounterSelection(
+  state: GameState,
+  loopIndex: number,
+  selection: EncounterSelection
+): GameState {
+  const currentAnomalyId = selection.anomalyId;
+  const recentAnomalyIds = currentAnomalyId
+    ? [currentAnomalyId, ...state.recentAnomalyIds].slice(0, 3)
+    : state.recentAnomalyIds;
+  const usedAnomalyCounts = currentAnomalyId
+    ? {
+        ...state.usedAnomalyCounts,
+        [currentAnomalyId]: (state.usedAnomalyCounts[currentAnomalyId] ?? 0) + 1
+      }
+    : state.usedAnomalyCounts;
+
+  return {
+    ...state,
+    loopIndex,
+    currentAnomalyId,
+    expectedAction: expectedActionForAnomaly(currentAnomalyId),
+    encounterChance: selection.chance,
+    encounterRoll: selection.roll,
+    encounterHistory: [...state.encounterHistory, currentAnomalyId].slice(-8),
+    recentAnomalyIds,
+    usedAnomalyCounts
   };
 }

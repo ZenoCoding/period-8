@@ -4,6 +4,9 @@ Hallway asset sources for the private Repetition prototype.
   https://www.get3dmodels.com/architecture/simple-paneled-door/
 - `locker-bank.glb`: Rusty Metal Lockers, Get3DModels / Chenchanchong
   https://www.get3dmodels.com/furniture/rusty-metal-lockers/
+- `school-locker.glb`: Locker, Sketchfab / Loic
+  https://sketchfab.com/3d-models/locker-ed00cf5ea92741eab1d9ce1371681618
+  License: CC-BY-4.0
 - `wall-clock.glb`: Wall Clock, Get3DModels / Mohamed Ahmed. Kept for reference after testing; the runtime uses a purpose-built school wall clock mesh because this asset reads as a side-profile pendulum clock in the hallway.
   https://www.get3dmodels.com/tools-and-gadgets/wall-clock/
 

@@ -10,6 +10,11 @@ export interface GameState {
   currentAnomalyId: AnomalyId | null;
   expectedAction: DirectionChoice;
   failCount: number;
+  encounterChance: number;
+  encounterRoll: number;
+  encounterHistory: (AnomalyId | null)[];
+  recentAnomalyIds: AnomalyId[];
+  usedAnomalyCounts: Partial<Record<AnomalyId, number>>;
   ambienceLevel: number;
   streak: number;
   phase: GamePhase;

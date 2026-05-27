@@ -52,6 +52,13 @@ interface WalkerRoutePoint {
   yaw: number;
 }
 
+interface FaceMaterialState {
+  material: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
+  color: THREE.Color;
+  emissive: THREE.Color;
+  emissiveIntensity: number;
+}
+
 export interface HallwayWalkerSnapshot {
   loaded: boolean;
   visible: boolean;
@@ -67,11 +74,14 @@ export interface HallwayWalkerSnapshot {
 export interface HallwayWalker {
   readonly root: THREE.Group;
   start(parent: THREE.Object3D): void;
+  setAnomalyMode(mode: WalkerAnomalyMode, playerWorldPosition?: THREE.Vector3, elapsedSeconds?: number): void;
   setHeadTracking(isTracking: boolean, playerWorldPosition?: THREE.Vector3, elapsedSeconds?: number): void;
   update(deltaSeconds: number): void;
   snapshot(): HallwayWalkerSnapshot;
   dispose(): void;
 }
+
+export type WalkerAnomalyMode = 'normal' | 'staring' | 'faceMissing';
 
 const gltfLoader = new GLTFLoader();
 let characterAssetPromise: Promise<CharacterAsset> | null = null;
@@ -89,6 +99,8 @@ class ImportedHallwayWalker implements HallwayWalker {
   private headBone: THREE.Object3D | null = null;
   private readonly headCutCollar: THREE.Mesh;
   private baseHeadRotation: THREE.Euler | null = null;
+  private faceMaterialStates: FaceMaterialState[] = [];
+  private anomalyMode: WalkerAnomalyMode = 'normal';
   private isHeadTracking = false;
   private headTrackingTarget = new THREE.Vector3();
   private headTrackingElapsedSeconds = 0;
@@ -145,6 +157,12 @@ class ImportedHallwayWalker implements HallwayWalker {
   }
 
   setHeadTracking(isTracking: boolean, playerWorldPosition?: THREE.Vector3, elapsedSeconds = 0): void {
+    this.setAnomalyMode(isTracking ? 'staring' : 'normal', playerWorldPosition, elapsedSeconds);
+  }
+
+  setAnomalyMode(mode: WalkerAnomalyMode, playerWorldPosition?: THREE.Vector3, elapsedSeconds = 0): void {
+    this.anomalyMode = mode;
+    const isTracking = mode === 'staring';
     this.isHeadTracking = isTracking;
     this.headTrackingElapsedSeconds = elapsedSeconds;
 
@@ -157,6 +175,7 @@ class ImportedHallwayWalker implements HallwayWalker {
     }
 
     this.headCutCollar.visible = isTracking;
+    this.applyFaceMissing(mode === 'faceMissing');
   }
 
   snapshot(): HallwayWalkerSnapshot {
@@ -194,6 +213,7 @@ class ImportedHallwayWalker implements HallwayWalker {
 
       const model = cloneSkeleton(asset.scene);
       model.name = 'business-man-model';
+      cloneModelMaterials(model);
       fitModelToHallway(model);
       model.rotation.y = MODEL_FORWARD_YAW_OFFSET;
       ageBusinessManMaterials(model);
@@ -206,6 +226,8 @@ class ImportedHallwayWalker implements HallwayWalker {
 
       this.headBone = model.getObjectByName('Head') ?? null;
       this.baseHeadRotation = this.headBone?.rotation.clone() ?? null;
+      this.faceMaterialStates = collectFaceMaterialStates(model);
+      this.applyFaceMissing(this.anomalyMode === 'faceMissing');
       this.root.add(model);
       this.mixer = new THREE.AnimationMixer(model);
       this.walkAction = createAction(this.mixer, asset.animations, 'Walk');
@@ -326,6 +348,20 @@ class ImportedHallwayWalker implements HallwayWalker {
     this.headBone.rotation.copy(this.baseHeadRotation);
   }
 
+  private applyFaceMissing(isMissing: boolean): void {
+    for (const state of this.faceMaterialStates) {
+      if (isMissing) {
+        state.material.color.setHex(0xc99d7c);
+        state.material.emissive.setHex(0x000000);
+        state.material.emissiveIntensity = 0;
+      } else {
+        state.material.color.copy(state.color);
+        state.material.emissive.copy(state.emissive);
+        state.material.emissiveIntensity = state.emissiveIntensity;
+      }
+    }
+  }
+
   private advanceRoute(deltaSeconds: number): void {
     if (this.routeIndex >= WALKER_ROUTE.length - 1) {
       this.stopAtEnd();
@@ -406,6 +442,49 @@ function ageBusinessManMaterials(model: THREE.Object3D): void {
 
     applyMaterialTint(object.material);
   });
+}
+
+function cloneModelMaterials(model: THREE.Object3D): void {
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) {
+      return;
+    }
+
+    object.material = Array.isArray(object.material)
+      ? object.material.map((material) => material.clone())
+      : object.material.clone();
+  });
+}
+
+function collectFaceMaterialStates(model: THREE.Object3D): FaceMaterialState[] {
+  const states = new Map<THREE.Material, FaceMaterialState>();
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) {
+      return;
+    }
+
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (
+        material.name !== 'Eye' &&
+        material.name !== 'Eyebrows'
+      ) {
+        continue;
+      }
+
+      if (!(material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhysicalMaterial)) {
+        continue;
+      }
+
+      states.set(material, {
+        material,
+        color: material.color.clone(),
+        emissive: material.emissive.clone(),
+        emissiveIntensity: material.emissiveIntensity
+      });
+    }
+  });
+  return [...states.values()];
 }
 
 function createHeadCutCollar(): THREE.Mesh {
