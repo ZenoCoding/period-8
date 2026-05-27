@@ -12,7 +12,7 @@ export interface HudElements {
   setLocked(isLocked: boolean): void;
   setPaused(isPaused: boolean): void;
   setDebugVisible(isVisible: boolean): void;
-  setFps(averageFps: number, lastFrameMs: number, isLow: boolean): void;
+  setFps(averageFps: number, lastFrameMs: number, maxFrameMs: number, isLow: boolean): void;
   setScreenEffects(fuzz: number, jitter: number): void;
   flashPortal(): void;
 }
@@ -60,13 +60,15 @@ export function createHud(parent: HTMLElement): HudElements {
     },
     setPaused(isPaused: boolean) {
       root.classList.toggle('hud--paused', isPaused);
-      prompt.textContent = isPaused ? 'Paused' : 'Click to enter';
+      if (!prompt.disabled) {
+        prompt.textContent = isPaused ? 'Paused' : 'Click to enter';
+      }
     },
     setDebugVisible(isVisible: boolean) {
       debug.classList.toggle('hud__debug--visible', isVisible);
     },
-    setFps(averageFps: number, lastFrameMs: number, isLow: boolean) {
-      fps.textContent = `FPS ${Math.round(averageFps)} | ${Math.round(lastFrameMs)} ms`;
+    setFps(averageFps: number, lastFrameMs: number, maxFrameMs: number, isLow: boolean) {
+      fps.textContent = `FPS ${Math.round(averageFps)} | ${Math.round(lastFrameMs)} ms (Max: ${Math.round(maxFrameMs)} ms)`;
       fps.classList.toggle('hud__fps--low', isLow);
     },
     setScreenEffects(fuzz: number, jitter: number) {

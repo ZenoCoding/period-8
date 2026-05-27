@@ -53,6 +53,7 @@ export interface HallwayHandles {
   fluorescentSparkGroups: THREE.Group[];
   mismatchTile: THREE.Mesh;
   bulletinBoardTexture: THREE.CanvasTexture;
+  bulletinBoardMaterial: THREE.MeshStandardMaterial;
   posterEyeTrackers: PosterEyeHandle[];
   posterFaceWrongOverlay: THREE.Mesh;
   hallwayFigure: THREE.Group;
@@ -116,6 +117,7 @@ export type TransitionSignOutcome = 'idle' | 'correct' | 'wrong';
 export interface TransitionSignHandle {
   root: THREE.Group;
   numberTexture: THREE.CanvasTexture;
+  numberMaterial: THREE.MeshBasicMaterial;
 }
 
 export interface TransitionSignHandles {
@@ -208,6 +210,123 @@ const modelCache = new Map<string, Promise<THREE.Group>>();
 let chalkNumberFontLoaded = false;
 let chalkNumberFontPromise: Promise<void> | null = null;
 let sparkAlphaTexture: THREE.CanvasTexture | null = null;
+
+let sharedScuffTexture: THREE.CanvasTexture | null = null;
+let sharedWallScuffMaterial: THREE.MeshBasicMaterial | null = null;
+let sharedClockFaceTexture: THREE.CanvasTexture | null = null;
+let sharedCeilingStainTexture: THREE.CanvasTexture | null = null;
+let sharedRedFloodSurfaceTexture: THREE.CanvasTexture | null = null;
+let sharedRedFloodFoamTexture: THREE.CanvasTexture | null = null;
+let sharedRedFloodWaveTexture: THREE.CanvasTexture | null = null;
+export const levelSignTextureCache = new Map<string, THREE.CanvasTexture>();
+export const bulletinBoardTextureCache = new Map<boolean, THREE.CanvasTexture>();
+
+function getSharedWallScuffMaterial(): THREE.MeshBasicMaterial {
+  if (sharedWallScuffMaterial) {
+    return sharedWallScuffMaterial;
+  }
+  sharedScuffTexture = createScuffTexture(1024, 256, 0.14);
+  sharedWallScuffMaterial = new THREE.MeshBasicMaterial({
+    map: sharedScuffTexture,
+    color: 0x6c7069,
+    transparent: true,
+    opacity: 0.15,
+    depthWrite: false
+  });
+  return sharedWallScuffMaterial;
+}
+
+function getClockFaceTexture(): THREE.CanvasTexture {
+  if (sharedClockFaceTexture) {
+    return sharedClockFaceTexture;
+  }
+  sharedClockFaceTexture = createClockFaceTexture();
+  return sharedClockFaceTexture;
+}
+
+function getCeilingStainTexture(): THREE.CanvasTexture {
+  if (sharedCeilingStainTexture) {
+    return sharedCeilingStainTexture;
+  }
+  sharedCeilingStainTexture = createCeilingStainTexture();
+  return sharedCeilingStainTexture;
+}
+
+function getRedFloodSurfaceTexture(): THREE.CanvasTexture {
+  if (sharedRedFloodSurfaceTexture) {
+    return sharedRedFloodSurfaceTexture;
+  }
+  sharedRedFloodSurfaceTexture = createRedFloodSurfaceTexture();
+  return sharedRedFloodSurfaceTexture;
+}
+
+function getRedFloodFoamTexture(): THREE.CanvasTexture {
+  if (sharedRedFloodFoamTexture) {
+    return sharedRedFloodFoamTexture;
+  }
+  sharedRedFloodFoamTexture = createRedFloodFoamTexture();
+  return sharedRedFloodFoamTexture;
+}
+
+function getRedFloodWaveTexture(): THREE.CanvasTexture {
+  if (sharedRedFloodWaveTexture) {
+    return sharedRedFloodWaveTexture;
+  }
+  sharedRedFloodWaveTexture = createRedFloodWaveTexture();
+  return sharedRedFloodWaveTexture;
+}
+
+export function getLevelSignTexture(
+  level: number,
+  targetLoops: number,
+  isEscaped: boolean,
+  outcome: TransitionSignOutcome
+): THREE.CanvasTexture {
+  const key = `${level}_${targetLoops}_${isEscaped}_${outcome}`;
+  let texture = levelSignTextureCache.get(key);
+  if (!texture) {
+    const canvas = document.createElement('canvas');
+    canvas.width = TRANSITION_SIGN_CANVAS_WIDTH;
+    canvas.height = TRANSITION_SIGN_CANVAS_HEIGHT;
+    texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    paintLevelSignNumber(texture, level, targetLoops, isEscaped, outcome);
+    levelSignTextureCache.set(key, texture);
+  }
+  return texture;
+}
+
+export function warmUpLevelSignTextures(targetLoops: number): void {
+  for (let level = 0; level <= targetLoops; level += 1) {
+    getLevelSignTexture(level, targetLoops, false, 'idle');
+    getLevelSignTexture(level, targetLoops, false, 'correct');
+    getLevelSignTexture(level, targetLoops, false, 'wrong');
+  }
+  getLevelSignTexture(targetLoops, targetLoops, true, 'idle');
+  getLevelSignTexture(targetLoops, targetLoops, true, 'correct');
+  getLevelSignTexture(targetLoops, targetLoops, true, 'wrong');
+}
+
+function getBulletinBoardTexture(isWarning: boolean): THREE.CanvasTexture {
+  let texture = bulletinBoardTextureCache.get(isWarning);
+  if (!texture) {
+    texture = createBulletinBoardTexture(isWarning);
+    bulletinBoardTextureCache.set(isWarning, texture);
+  }
+  return texture;
+}
+
+export function warmUpBulletinBoardTextures(): void {
+  getBulletinBoardTexture(false);
+  getBulletinBoardTexture(true);
+}
+
+export function warmUpModels(): Promise<void> {
+  return Promise.all([
+    getModel(`${MODEL_ROOT}/classroom-door.glb`),
+    getModel(`${MODEL_ROOT}/school-locker.glb`)
+  ]).then(() => undefined);
+}
 
 interface ShellOptions {
   walkableRects: BoundsRect[];
@@ -496,7 +615,10 @@ export function setTransitionSign(
   isEscaped: boolean,
   outcome: TransitionSignOutcome = 'idle'
 ): void {
-  paintLevelSignNumber(getTransitionSign(handles, side).numberTexture, level, targetLoops, isEscaped, outcome);
+  const sign = getTransitionSign(handles, side);
+  const texture = getLevelSignTexture(level, targetLoops, isEscaped, outcome);
+  sign.numberMaterial.map = texture;
+  sign.numberMaterial.needsUpdate = true;
 }
 
 export function setTransitionSignVisible(handles: HallwayHandles, visibleSide: TransitionSignSide | null): void {
@@ -516,7 +638,9 @@ export function setTransitionSignTransform(
 }
 
 export function setBulletinBoardWarning(handles: HallwayHandles, isWarning: boolean): void {
-  paintBulletinBoardTexture(handles.bulletinBoardTexture, isWarning);
+  const texture = getBulletinBoardTexture(isWarning);
+  handles.bulletinBoardMaterial.map = texture;
+  handles.bulletinBoardMaterial.needsUpdate = true;
 }
 
 function getTransitionSign(handles: HallwayHandles, side: TransitionSignSide): TransitionSignHandle {
@@ -988,13 +1112,7 @@ function addWallRailZ(
 }
 
 function addScuffDecals(root: THREE.Group, walkableRects: BoundsRect[]): void {
-  const wallScuffMaterial = new THREE.MeshBasicMaterial({
-    map: createScuffTexture(1024, 256, 0.14),
-    color: 0x6c7069,
-    transparent: true,
-    opacity: 0.15,
-    depthWrite: false
-  });
+  const wallScuffMaterial = getSharedWallScuffMaterial();
 
   for (const rect of walkableRects) {
     const width = rect.xMax - rect.xMin;
@@ -1577,7 +1695,7 @@ interface LevelSignOptions {
 
 function addLevelSign(root: THREE.Group, options: LevelSignOptions): TransitionSignHandle {
   const boardTexture = loadFlatTexture(TRANSITION_CHALKBOARD_TEXTURE, true);
-  const numberTexture = createLevelSignNumberTexture();
+  const numberTexture = getLevelSignTexture(0, 8, false, 'idle');
   const signMaterial = new THREE.MeshStandardMaterial({
     map: boardTexture,
     roughness: 0.72,
@@ -1611,19 +1729,10 @@ function addLevelSign(root: THREE.Group, options: LevelSignOptions): TransitionS
 
   addBox(sign, `${options.name}-backing`, [TRANSITION_SIGN_WIDTH + 0.04, TRANSITION_SIGN_HEIGHT + 0.04, 0.025], [0, 0, 0], signMaterial);
 
-  return { root: sign, numberTexture };
+  return { root: sign, numberTexture, numberMaterial };
 }
 
-function createLevelSignNumberTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = TRANSITION_SIGN_CANVAS_WIDTH;
-  canvas.height = TRANSITION_SIGN_CANVAS_HEIGHT;
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  ensureChalkNumberFontLoaded(() => paintLevelSignNumber(texture, 0, 8, false, 'idle'));
-  paintLevelSignNumber(texture, 0, 8, false, 'idle');
-  return texture;
-}
+
 
 function paintLevelSignNumber(
   texture: THREE.CanvasTexture,
@@ -1920,9 +2029,7 @@ function addPosterSeries(root: THREE.Group): Pick<HallwayHandles, 'posterEyeTrac
 }
 
 function loadPosterTexture(path: string): THREE.Texture {
-  const texture = new THREE.TextureLoader().load(path);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
+  return loadFlatTexture(path, true);
 }
 
 function createWarpedPosterPatchGeometry(width: number, height: number): THREE.PlaneGeometry {
@@ -1942,8 +2049,8 @@ function createWarpedPosterPatchGeometry(width: number, height: number): THREE.P
   return geometry;
 }
 
-function addBulletinBoard(root: THREE.Group): Pick<HallwayHandles, 'bulletinBoardTexture'> {
-  const bulletinBoardTexture = createBulletinBoardTexture(false);
+function addBulletinBoard(root: THREE.Group): Pick<HallwayHandles, 'bulletinBoardTexture' | 'bulletinBoardMaterial'> {
+  const bulletinBoardTexture = getBulletinBoardTexture(false);
   const corkMaterial = new THREE.MeshStandardMaterial({
     map: bulletinBoardTexture,
     roughness: 0.82,
@@ -1987,7 +2094,7 @@ function addBulletinBoard(root: THREE.Group): Pick<HallwayHandles, 'bulletinBoar
     material: frameMaterial
   });
 
-  return { bulletinBoardTexture };
+  return { bulletinBoardTexture, bulletinBoardMaterial: corkMaterial };
 }
 
 function createBulletinBoardTexture(isWarning: boolean): THREE.CanvasTexture {
@@ -2195,7 +2302,7 @@ function addRedFlood(root: THREE.Group): Pick<
   HallwayHandles,
   'redFlood' | 'redFloodMaterial' | 'redFloodFoam' | 'redFloodFoamMaterial' | 'redFloodWave' | 'redFloodWaveMaterial' | 'redFloodWake' | 'redFloodWakeMaterial'
 > {
-  const redFloodTexture = createRedFloodSurfaceTexture();
+  const redFloodTexture = getRedFloodSurfaceTexture();
   redFloodTexture.wrapS = THREE.RepeatWrapping;
   redFloodTexture.wrapT = THREE.RepeatWrapping;
   redFloodTexture.repeat.set(1.4, 5.6);
@@ -2223,7 +2330,7 @@ function addRedFlood(root: THREE.Group): Pick<
   root.add(redFlood);
 
   const redFloodFoamMaterial = new THREE.MeshBasicMaterial({
-    map: createRedFloodFoamTexture(),
+    map: getRedFloodFoamTexture(),
     color: 0xffd5c8,
     transparent: true,
     opacity: 0,
@@ -2242,7 +2349,7 @@ function addRedFlood(root: THREE.Group): Pick<
   root.add(redFloodFoam);
 
   const redFloodWaveMaterial = new THREE.MeshBasicMaterial({
-    map: createRedFloodWaveTexture(),
+    map: getRedFloodWaveTexture(),
     color: 0xff7a5f,
     transparent: true,
     opacity: 0,
@@ -2261,7 +2368,7 @@ function addRedFlood(root: THREE.Group): Pick<
   root.add(redFloodWave);
 
   const redFloodWakeMaterial = new THREE.MeshBasicMaterial({
-    map: createRedFloodFoamTexture(),
+    map: getRedFloodFoamTexture(),
     color: 0xd9b8aa,
     transparent: true,
     opacity: 0,
@@ -2555,7 +2662,7 @@ function addClock(
     new THREE.CircleGeometry(0.34, 56),
     new THREE.MeshStandardMaterial({
       color: 0xffffff,
-      map: createClockFaceTexture(),
+      map: getClockFaceTexture(),
       roughness: 0.68,
       metalness: 0.01
     })
@@ -2795,7 +2902,7 @@ function addFloorExtraTile(root: THREE.Group): THREE.Mesh {
 }
 
 function addCeilingStainFace(root: THREE.Group): THREE.Mesh {
-  const texture = createCeilingStainTexture();
+  const texture = getCeilingStainTexture();
   const stain = new THREE.Mesh(
     new THREE.PlaneGeometry(1.35, 0.82),
     new THREE.MeshBasicMaterial({

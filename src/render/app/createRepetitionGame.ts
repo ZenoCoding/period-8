@@ -20,7 +20,12 @@ import {
   TRANSITION_ENTRY_Z_MIN,
   WALKABLE_RECTS,
   type BoundsRect,
-  type HallwayHandles
+  type HallwayHandles,
+  warmUpModels,
+  warmUpLevelSignTextures,
+  warmUpBulletinBoardTextures,
+  levelSignTextureCache,
+  bulletinBoardTextureCache
 } from '../objects/hallway';
 import { createHallwayWalker, type HallwayWalkerSnapshot, type WalkerAnomalyMode } from '../objects/hallwayWalker';
 import {
@@ -108,6 +113,20 @@ const RECORDED_FOOTSTEP_SEGMENT_OFFSETS = [
 ] as const;
 const UP = new THREE.Vector3(0, 1, 0);
 
+// Pre-allocated static scratch vectors to completely eliminate runtime GC churn
+const walkWorldScratch = new THREE.Vector3();
+const walkLocalScratch = new THREE.Vector3();
+const exitSideScratch = new THREE.Vector3();
+const commitGateScratch = new THREE.Vector3();
+const insideHallwayScratch = new THREE.Vector3();
+const handoffScratch = new THREE.Vector3();
+const lightFailureScratch = new THREE.Vector3();
+const recenterScratch = new THREE.Vector3();
+const debugLocalScratch = new THREE.Vector3();
+const debugQueuedLocalScratch = new THREE.Vector3();
+const textRenderScratch = new THREE.Vector3();
+
+
 interface HallwayCell {
   handles: HallwayHandles;
   state: GameState;
@@ -122,6 +141,7 @@ interface FramePerformance {
     averageRenderMs: number;
     lastRenderMs: number;
     lastFrameMs: number;
+    maxFrameMs: number;
   };
 }
 
@@ -168,8 +188,6 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let nextHallway: HallwayCell | null = null;
   let standbyHallway: HallwayCell | null = null;
   let queuedPreviewHallway: HallwayCell | null = null;
-  let pendingStandbyState: GameState | null = null;
-  let isStandbyPreparationScheduled = false;
   let transitionTuning = loadTransitionTuning();
   let animationFrame = 0;
   let frameAccumulator = 0;
@@ -177,7 +195,6 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let fpsHudAccumulator = 0;
   let isRenderLoopRunning = false;
   let isPaused = false;
-  let isDestroyed = false;
   let isPointerLocked = false;
   let isAdvancingAutomation = false;
   let transitionCooldown = 0;
@@ -216,12 +233,134 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   let installedAdvanceTime: Window['advanceTime'] = undefined;
   let installedRenderGameToText: Window['render_game_to_text'] = undefined;
   let automationFrameAccumulator = 0;
+  let isAssetLoadingCompleted = false;
+
+  // Warm up and pre-render chalkboard sign textures and bulletin board textures
+  warmUpLevelSignTextures(state.targetLoops);
+  warmUpBulletinBoardTextures();
 
   applyTransitionTuningToHallway(hallway);
   applyAnomaly(hallway, state.currentAnomalyId);
   resetTransitionSigns(state.loopIndex, 'idle');
   renderHud(hud, state);
-  scheduleHallwayPoolWarmup();
+
+  // Synchronously initialize the hallway pool for zero transition lag!
+  queuedPreviewHallway = createHiddenHallwayCell(
+    createHallwayScene(scene, { layout: 'queuedNext' }),
+    state,
+    QUEUED_HALLWAY_RECTS
+  );
+  standbyHallway = createHiddenHallwayCell(createHallwayScene(scene), state, WALKABLE_RECTS);
+  prepareStandbyHallway(state);
+
+  // Define the shader and shadow map pre-warming routine
+  function preWarmShadersAndShadowMaps(): void {
+    const originalHallwayVisible = hallway.root.visible;
+    const originalStandbyVisible = standbyHallway!.handles.root.visible;
+    const originalQueuedVisible = queuedPreviewHallway!.handles.root.visible;
+
+    // Temporarily make all hallways visible in the scene
+    hallway.root.visible = true;
+    standbyHallway!.handles.root.visible = true;
+    queuedPreviewHallway!.handles.root.visible = true;
+
+    // Recursively make ALL child meshes visible so their shaders compile and textures upload!
+    const originalVisibles = new Map<THREE.Object3D, boolean>();
+
+    function setAllVisible(object: THREE.Object3D) {
+      originalVisibles.set(object, object.visible);
+      object.visible = true;
+      for (const child of object.children) {
+        setAllVisible(child);
+      }
+    }
+
+    setAllVisible(hallway.root);
+    setAllVisible(standbyHallway!.handles.root);
+    setAllVisible(queuedPreviewHallway!.handles.root);
+
+    // Pre-compile shaders
+    renderer.compile(scene, camera);
+
+    // Render offscreen frame to a 1x1 offscreen render target.
+    // This forces Three.js to compile all WebGL programs, upload textures, and generate shadow maps.
+    const tempTarget = new THREE.WebGLRenderTarget(1, 1);
+    renderer.setRenderTarget(tempTarget);
+    const originalShadowMapAutoUpdate = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = true;
+    renderer.shadowMap.needsUpdate = true;
+
+    // 1. Warm up the base scene with all anomaly meshes visible
+    renderer.render(scene, camera);
+
+    // 2. Warm up ALL pre-rendered level sign textures by rendering/binding them once to GPU texture memory
+    const sign = hallway.transitionSigns.negative;
+    const originalSignMap = sign.numberMaterial.map;
+    for (const texture of levelSignTextureCache.values()) {
+      sign.numberMaterial.map = texture;
+      sign.numberMaterial.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+    sign.numberMaterial.map = originalSignMap;
+    sign.numberMaterial.needsUpdate = true;
+
+    // 3. Warm up ALL bulletin board textures by rendering/binding them once to GPU texture memory
+    const cork = hallway.bulletinBoardMaterial;
+    const originalCorkMap = cork.map;
+    for (const texture of bulletinBoardTextureCache.values()) {
+      cork.map = texture;
+      cork.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+    cork.map = originalCorkMap;
+    cork.needsUpdate = true;
+
+    renderer.shadowMap.autoUpdate = originalShadowMapAutoUpdate;
+    renderer.setRenderTarget(null);
+    tempTarget.dispose();
+
+    // Restore the original visibilities
+    function restoreVisibilities(object: THREE.Object3D) {
+      const original = originalVisibles.get(object);
+      if (original !== undefined) {
+        object.visible = original;
+      }
+      for (const child of object.children) {
+        restoreVisibilities(child);
+      }
+    }
+
+    restoreVisibilities(hallway.root);
+    restoreVisibilities(standbyHallway!.handles.root);
+    restoreVisibilities(queuedPreviewHallway!.handles.root);
+
+    hallway.root.visible = originalHallwayVisible;
+    standbyHallway!.handles.root.visible = originalStandbyVisible;
+    queuedPreviewHallway!.handles.root.visible = originalQueuedVisible;
+  }
+
+  // Pre-load GLTF models asynchronously, wait two frames for insertions, then pre-warm
+  hud.prompt.disabled = true;
+  hud.prompt.textContent = 'Loading assets...';
+
+  warmUpModels()
+    .then(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          preWarmShadersAndShadowMaps();
+          isAssetLoadingCompleted = true;
+          hud.prompt.disabled = false;
+          hud.prompt.textContent = isPaused ? 'Paused' : 'Click to enter';
+        });
+      });
+    })
+    .catch((error) => {
+      console.warn('Failed to pre-load GLTF models:', error);
+      isAssetLoadingCompleted = true;
+      hud.prompt.disabled = false;
+      hud.prompt.textContent = isPaused ? 'Paused' : 'Click to enter';
+    });
+
   installAutomationHooks();
 
   const resize = (): void => {
@@ -235,6 +374,9 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   };
 
   const requestLock = (): void => {
+    if (!isAssetLoadingCompleted) {
+      return;
+    }
     audio.resume();
     canvas.requestPointerLock();
   };
@@ -377,7 +519,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     frameAccumulator += frameDeltaSeconds;
     measuredFrameAccumulator += rawFrameDeltaSeconds;
 
-    if (frameAccumulator < TARGET_FRAME_SECONDS) {
+    // Headroom (4ms) to prevent vsync timer alignment jitter and maintain a smooth 30 FPS
+    if (frameAccumulator < TARGET_FRAME_SECONDS - 0.004) {
       animationFrame = requestAnimationFrame(tick);
       return;
     }
@@ -551,7 +694,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function getCurrentExitSide(): TransitionSide | null {
-    const local = worldToHallwayLocal(hallway, playerPosition);
+    const local = copyWorldToHallwayLocal(hallway, playerPosition, exitSideScratch);
 
     if (local.z <= NEGATIVE_EXIT_Z) {
       return -1;
@@ -569,7 +712,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function isPastCommitGate(side: TransitionSide): boolean {
-    const local = worldToHallwayLocal(hallway, playerPosition);
+    const local = copyWorldToHallwayLocal(hallway, playerPosition, commitGateScratch);
     return isPastTunedCommitGate(transitionTuning, side, local.x, local.z);
   }
 
@@ -580,7 +723,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function isInsideCurrentHallway(): boolean {
-    const local = worldToHallwayLocal(hallway, playerPosition);
+    const local = copyWorldToHallwayLocal(hallway, playerPosition, insideHallwayScratch);
     return (
       Math.abs(local.x) <= MAIN_CORRIDOR_CENTER_LIMIT &&
       local.z > MAIN_INTERIOR_Z_MIN &&
@@ -605,11 +748,11 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
     configureHallwayForState(queuedCell, nextState);
     nextHallway = queuedCell;
-    scheduleStandbyPreparation(nextState);
+    prepareStandbyHallway(nextState);
   }
 
   function isReadyForQueuedHallwayHandoff(cell: HallwayCell): boolean {
-    const local = worldToHallwayLocal(cell.handles, playerPosition);
+    const local = copyWorldToHallwayLocal(cell.handles, playerPosition, handoffScratch);
     const isInQueuedMain = (
       Math.abs(local.x) <= MAIN_CORRIDOR_CENTER_LIMIT &&
       local.z > MAIN_INTERIOR_Z_MIN &&
@@ -635,8 +778,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     if (promotedHallway.state !== cell.state) {
       prepareStandbyHallway(cell.state);
     }
-    pendingStandbyState = null;
-    const nextLocalPosition = worldToHallwayLocal(cell.handles, playerPosition);
+    copyWorldToHallwayLocal(cell.handles, playerPosition, recenterScratch);
     const nextRootYaw = cell.handles.root.rotation.y;
 
     yaw = normalizeAngle(yaw - nextRootYaw);
@@ -653,12 +795,11 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     hallway.root.rotation.set(0, 0, 0);
     hallway.root.updateMatrixWorld(true);
     playerPosition.copy(
-      hallway.root.localToWorld(new THREE.Vector3(nextLocalPosition.x, PLAYER_HEIGHT, nextLocalPosition.z))
+      hallway.root.localToWorld(recenterScratch)
     );
     resetTransitionSigns(state.loopIndex, 'idle');
     renderHud(hud, state);
     hallwayWalker.start(hallway.root);
-    renderer.shadowMap.needsUpdate = true;
     pulseScreenDistortion(1.08);
   }
 
@@ -787,9 +928,9 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function updateDebugOverlay(): void {
-    const local = worldToHallwayLocal(hallway, playerPosition);
+    const local = copyWorldToHallwayLocal(hallway, playerPosition, debugLocalScratch);
     const side = activeTransition?.side ?? getNearestTransitionSide(local.x, local.z);
-    const queuedLocal = nextHallway ? worldToHallwayLocal(nextHallway.handles, playerPosition) : null;
+    const queuedLocal = nextHallway ? copyWorldToHallwayLocal(nextHallway.handles, playerPosition, debugQueuedLocalScratch) : null;
     const ruleAnomaly = state.currentAnomalyId
       ? ANOMALY_BY_ID.get(state.currentAnomalyId)
       : null;
@@ -801,6 +942,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       : null;
     hud.debug.textContent = [
       `Position: x ${formatNumber(local.x)} z ${formatNumber(local.z)} yaw ${formatNumber(yaw)}`,
+      `Max Frame Latency: ${formatNumber(perf.snapshot().maxFrameMs)} ms (Limit: <100ms)`,
       queuedLocal ? `Queued local: x ${formatNumber(queuedLocal.x)} z ${formatNumber(queuedLocal.z)}` : 'Queued local: none',
       `Transition: ${transitionPhase} side ${formatSide(side)}`,
       `Period: ${state.loopIndex}/${state.targetLoops} outcome ${state.lastOutcome}`,
@@ -845,6 +987,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     hud.setFps(
       snapshot.averageFps,
       snapshot.lastFrameMs,
+      snapshot.maxFrameMs,
       snapshot.averageFps > 0 && (snapshot.averageFps < TARGET_FPS - 4 || hasFrameSpike)
     );
   }
@@ -916,7 +1059,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     }
 
     lightFailureElapsed += deltaSeconds;
-    const local = worldToHallwayLocal(hallway, playerPosition);
+    const local = copyWorldToHallwayLocal(hallway, playerPosition, lightFailureScratch);
     const reachedMiddle = Math.abs(local.z) <= LIGHT_FAILURE_MIDDLE_Z;
     if (!hasLightFailureBlackoutStarted && (lightFailureElapsed >= LIGHT_FAILURE_DELAY_SECONDS || reachedMiddle)) {
       hasLightFailureBlackoutStarted = true;
@@ -1076,7 +1219,8 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     shouldApplyCommitLock: boolean,
     walkableRects = WALKABLE_RECTS
   ): boolean {
-    const local = worldToHallwayLocal(handles, new THREE.Vector3(x, PLAYER_HEIGHT, z));
+    walkWorldScratch.set(x, PLAYER_HEIGHT, z);
+    const local = copyWorldToHallwayLocal(handles, walkWorldScratch, walkLocalScratch);
     if (!isWalkableLocal(local.x, local.z, walkableRects)) {
       return false;
     }
@@ -1134,40 +1278,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     return queuedPreviewHallway;
   }
 
-  function scheduleHallwayPoolWarmup(): void {
-    scheduleIdleWork(() => {
-      if (isDestroyed || queuedPreviewHallway) {
-        return;
-      }
 
-      queuedPreviewHallway = createHiddenHallwayCell(
-        createHallwayScene(scene, { layout: 'queuedNext' }),
-        state,
-        QUEUED_HALLWAY_RECTS
-      );
-      scheduleIdleWork(() => {
-        if (isDestroyed || standbyHallway) {
-          return;
-        }
-
-        standbyHallway = createHiddenHallwayCell(createHallwayScene(scene), state, WALKABLE_RECTS);
-        prepareStandbyHallway(state);
-      });
-    });
-  }
-
-  function scheduleIdleWork(work: () => void): void {
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-    };
-
-    if (idleWindow.requestIdleCallback) {
-      idleWindow.requestIdleCallback(work, { timeout: 1500 });
-      return;
-    }
-
-    window.setTimeout(work, 250);
-  }
 
   function createHiddenHallwayCell(
     handles: HallwayHandles,
@@ -1194,26 +1305,6 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     standby.handles.root.rotation.set(0, 0, 0);
     standby.handles.root.updateMatrixWorld(true);
     hideHallwayCell(standby);
-  }
-
-  function scheduleStandbyPreparation(nextState: GameState): void {
-    pendingStandbyState = nextState;
-    if (isStandbyPreparationScheduled) {
-      return;
-    }
-
-    isStandbyPreparationScheduled = true;
-    scheduleIdleWork(() => {
-      isStandbyPreparationScheduled = false;
-      const stateToPrepare = pendingStandbyState;
-      pendingStandbyState = null;
-
-      if (!stateToPrepare || isDestroyed) {
-        return;
-      }
-
-      prepareStandbyHallway(stateToPrepare);
-    });
   }
 
   function activateHallwayCell(cell: HallwayCell): void {
@@ -1256,7 +1347,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     installedRenderGameToText = (): string => {
       const local = copyWorldToHallwayLocal(hallway, playerPosition, hallwayLocalScratch);
       const queuedLocal = nextHallway
-        ? copyWorldToHallwayLocal(nextHallway.handles, playerPosition, new THREE.Vector3())
+        ? copyWorldToHallwayLocal(nextHallway.handles, playerPosition, textRenderScratch)
         : null;
       const performanceSnapshot = perf.snapshot();
       return JSON.stringify({
@@ -1332,7 +1423,6 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
 
   return {
     destroy(): void {
-      isDestroyed = true;
       stopRenderLoop();
       hud.prompt.removeEventListener('click', requestLock);
       canvas.removeEventListener('click', requestLock);
@@ -1581,13 +1671,20 @@ function createFramePerformanceTracker(): FramePerformance {
   const deltaSamples: number[] = [];
   let lastRenderMs = 0;
   let lastFrameMs = 0;
+  let maxFrameMs = 0;
 
   return {
     record(renderCostMs: number, frameDeltaSeconds: number): void {
       lastRenderMs = renderCostMs;
-      lastFrameMs = frameDeltaSeconds * 1000;
+      const currentFrameMs = frameDeltaSeconds * 1000;
+      lastFrameMs = currentFrameMs;
       renderSamples.push(renderCostMs);
       deltaSamples.push(frameDeltaSeconds);
+
+      // Skip the first 10 frames of startup/pre-warming to get a clean baseline of gameplay and transition frame times
+      if (deltaSamples.length > 10) {
+        maxFrameMs = Math.max(maxFrameMs, currentFrameMs);
+      }
 
       if (renderSamples.length > maxSamples) {
         renderSamples.shift();
@@ -1602,7 +1699,8 @@ function createFramePerformanceTracker(): FramePerformance {
         averageFps: averageDelta > 0 ? Math.round((1 / averageDelta) * 10) / 10 : 0,
         averageRenderMs: Math.round(averageRenderMs * 10) / 10,
         lastRenderMs: Math.round(lastRenderMs * 10) / 10,
-        lastFrameMs: Math.round(lastFrameMs * 10) / 10
+        lastFrameMs: Math.round(lastFrameMs * 10) / 10,
+        maxFrameMs: Math.round(maxFrameMs * 10) / 10
       };
     }
   };
