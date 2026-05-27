@@ -41,8 +41,8 @@ export function applyAnomaly(handles: HallwayHandles, anomalyId: AnomalyId | nul
       }
       break;
     case 'clock-wrong':
-      handles.clockHourPivot.rotation.z = THREE.MathUtils.degToRad(-108);
-      handles.clockMinutePivot.rotation.z = THREE.MathUtils.degToRad(-94);
+      handles.clockHourPivot.rotation.z = THREE.MathUtils.degToRad(-145);
+      handles.clockMinutePivot.rotation.z = THREE.MathUtils.degToRad(-55);
       handles.clockSecondPivot.visible = true;
       handles.clockSecondMaterial.emissiveIntensity = 0.45;
       break;
@@ -119,7 +119,7 @@ export function updateAnomaly(
   }
 
   if (state.currentAnomalyId === 'clock-wrong') {
-    handles.clockSecondPivot.rotation.z = Math.sin(elapsedSeconds * 0.45) * 0.03 + THREE.MathUtils.degToRad(-92);
+    handles.clockSecondPivot.rotation.z = Math.sin(elapsedSeconds * 2.8) * 0.35 + THREE.MathUtils.degToRad(-60);
   }
 
   if (state.currentAnomalyId === 'light-failure') {
@@ -327,7 +327,7 @@ function updateFluorescentSparks(handles: HallwayHandles, sparkPulse: number, el
     group.visible = pulse > 0.02;
     for (const [sparkIndex, spark] of group.children.entries()) {
       if (spark instanceof THREE.PointLight) {
-        spark.intensity = pulse * (4.5 + Math.sin(elapsedSeconds * 30 + groupIndex) * 1.5);
+        spark.intensity = pulse * (7.5 + Math.sin(elapsedSeconds * 30 + groupIndex) * 2.5);
         spark.distance = 1.15 + pulse * 1.2;
         continue;
       }
@@ -386,8 +386,8 @@ function updateSparkParticles(points: THREE.Points, pulse: number, elapsedSecond
 
   positionAttribute.needsUpdate = true;
   if (points.material instanceof THREE.PointsMaterial) {
-    points.material.opacity = Math.min(1, pulse * 0.95);
-    points.material.size = 0.035 + pulse * 0.045;
+    points.material.opacity = Math.min(1, pulse * 1.3);
+    points.material.size = 0.06 + pulse * 0.09;
   }
 }
 

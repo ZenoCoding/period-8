@@ -934,7 +934,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
       ? THREE.MathUtils.clamp(lightFailureBlackoutElapsed / LIGHT_FAILURE_BLACKOUT_SECONDS, 0, 1)
       : 0;
     const sparkPulse = hasLightFailureBlackoutStarted
-      ? Math.max(0, Math.sin(progress * Math.PI * 3.2)) * (1 - THREE.MathUtils.smoothstep(progress, 0.45, 1))
+      ? Math.max(0.15, Math.abs(Math.sin(progress * Math.PI * 4.5))) * (1 - THREE.MathUtils.smoothstep(progress, 0.65, 1))
       : 0;
 
     return {

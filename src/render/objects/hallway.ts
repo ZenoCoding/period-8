@@ -1182,7 +1182,7 @@ function addFluorescentSparks(
     opacity: 0,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    size: 0.055,
+    size: 0.1,
     sizeAttenuation: true
   });
   const sparks = new THREE.Points(sparkGeometry, sparkMaterial);
@@ -2420,7 +2420,7 @@ function pseudoUnit(seed: number): number {
 const LOCKER_COUNT = 9;
 const LOCKER_SPACING_Z = 0.56;
 const LOCKER_ROW_CENTER_Z = 0.45;
-const MISSING_LOCKER_INDEX = 4;
+const MISSING_LOCKER_INDEX = 8;
 
 function addLockers(
   root: THREE.Group,
