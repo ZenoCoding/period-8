@@ -32,6 +32,7 @@ export interface HallwayHandles {
   ambientLight: THREE.HemisphereLight;
   securityCameraHead: THREE.Object3D;
   securityCameraLensMaterial: THREE.MeshStandardMaterial;
+  securityCameraTrackTarget: THREE.Vector3;
   lockerDoor: THREE.Object3D;
   lockerInterior: THREE.Mesh;
   lockerInteriorMaterial: THREE.MeshStandardMaterial;
@@ -127,7 +128,7 @@ export interface TransitionSignHandles {
 
 export const MAIN_HALF_WIDTH = 1.8;
 export const MAIN_HALF_LENGTH = 8 * 1.5;
-export const TRANSITION_BRANCH_X_MAX = 8;
+export const TRANSITION_BRANCH_X_MAX = 12;
 export const TRANSITION_ENTRY_Z_MIN = MAIN_HALF_LENGTH - MAIN_HALF_WIDTH;
 export const TRANSITION_ENTRY_Z_MAX = MAIN_HALF_LENGTH + MAIN_HALF_WIDTH;
 export const TRANSITION_CONNECTOR_CENTER_Z = MAIN_HALF_LENGTH + TRANSITION_BRANCH_X_MAX;
@@ -1193,12 +1194,12 @@ function addFluorescentLights(
   const dimTubeMaterial = tubeMaterial.clone();
   const fixtureMaterial = createCleanMetalMaterial(0xcbd1d0, 0.28);
   const lightSpecs = [
-    { x: 0, z: 4.5, rotY: 0, intensity: 13.8 },
-    { x: 0, z: -3.3, rotY: 0, intensity: 12.8 },
-    { x: -4.8, z: -8, rotY: Math.PI / 2, intensity: 11.6 },
-    { x: -8, z: -12.4, rotY: 0, intensity: 12.2 },
-    { x: -3.8, z: -16, rotY: Math.PI / 2, intensity: 10.8 },
-    { x: 0, z: -21.2, rotY: 0, intensity: 10.4 }
+    { x: 0, z: MAIN_HALF_LENGTH / 2, rotY: 0, intensity: 13.8 },
+    { x: 0, z: -MAIN_HALF_LENGTH / 2, rotY: 0, intensity: 12.8 },
+    { x: -TRANSITION_BRANCH_X_MAX / 2, z: -MAIN_HALF_LENGTH, rotY: Math.PI / 2, intensity: 11.6 },
+    { x: -TRANSITION_BRANCH_X_MAX, z: -(MAIN_HALF_LENGTH + TRANSITION_BRANCH_X_MAX / 2), rotY: 0, intensity: 12.2 },
+    { x: -(TRANSITION_BRANCH_X_MAX + TRANSITION_CONNECTOR_X_MAX) / 2, z: -TRANSITION_CONNECTOR_CENTER_Z, rotY: Math.PI / 2, intensity: 10.8 },
+    { x: -QUEUED_HALLWAY_ROOT_LOCAL_X, z: -QUEUED_HALLWAY_ROOT_LOCAL_Z + MAIN_HALF_LENGTH / 2, rotY: 0, intensity: 10.4 }
   ];
 
   let flickerLight = new THREE.RectAreaLight(0xe2f2ff, 0, 0.34, 1.78);
@@ -1400,7 +1401,9 @@ function addProps(
 }
 
 function getTransitionSignPosition(side: TransitionSignSide): THREE.Vector3 {
-  return new THREE.Vector3(side * 9.73, 1.7, side * 17.25);
+  const signX = TRANSITION_BRANCH_X_MAX + MAIN_HALF_WIDTH - 0.07;
+  const signZ = TRANSITION_CONNECTOR_CENTER_Z - 2.75;
+  return new THREE.Vector3(side * signX, 1.7, side * signZ);
 }
 
 function getTransitionSignRotation(side: TransitionSignSide): number {
@@ -1500,14 +1503,14 @@ function addDoorAnomalyOverlays(
   });
   const doorLabelWrong = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.15), labelMaterial);
   doorLabelWrong.name = 'classroom-door-wrong-label-overlay';
-  doorLabelWrong.position.set(POSITIVE_WALL_FACE_X - 0.018, 1.96, 4.64);
+  doorLabelWrong.position.set(POSITIVE_WALL_FACE_X - 0.015, 1.96, 4.95 - 0.31);
   doorLabelWrong.rotation.y = -Math.PI / 2;
   doorLabelWrong.visible = false;
   root.add(doorLabelWrong);
 
   const doorHandleCentered = new THREE.Group();
   doorHandleCentered.name = 'classroom-door-centered-handle-overlay';
-  doorHandleCentered.position.set(POSITIVE_WALL_FACE_X - 0.04, 1.0, 4.95);
+  doorHandleCentered.position.set(POSITIVE_WALL_FACE_X - 0.03, 1.0, 4.95);
   doorHandleCentered.rotation.y = -Math.PI / 2;
   doorHandleCentered.visible = false;
   root.add(doorHandleCentered);
@@ -2529,6 +2532,108 @@ const LOCKER_SPACING_Z = 0.56;
 const LOCKER_ROW_CENTER_Z = 0.45;
 const MISSING_LOCKER_INDEX = 8;
 
+function loadSingleLockerInto(parent: THREE.Object3D, fallback: THREE.Object3D): void {
+  const placement: ModelPlacementOptions = {
+    rotation: new THREE.Euler(0, -Math.PI / 2, 0),
+    fitSize: new THREE.Vector3(0.42, 1.82, 0.5),
+    fitAxes: ['y'] as ('x' | 'y' | 'z')[],
+    center: new THREE.Vector3(0, 0.94, 0)
+  };
+
+  void getModel(`${MODEL_ROOT}/school-locker.glb`)
+    .then((source) => {
+      const instance = source.clone(true);
+      instance.name = 'single-locker-instance';
+      applyModelPlacement(instance, placement);
+      instance.updateMatrixWorld(true);
+
+      // The 3-locker model is arranged along Z after rotation.
+      // Compute bounds and keep only the first third (lowest Z = first closed locker).
+      const bounds = new THREE.Box3().setFromObject(instance);
+      const zExtent = bounds.max.z - bounds.min.z;
+      const cutZ = bounds.min.z + zExtent / 3;
+      const v = new THREE.Vector3();
+
+      // Clip each mesh's geometry at the triangle level
+      instance.traverse((child) => {
+        if (!(child instanceof THREE.Mesh)) {
+          return;
+        }
+
+        const geo = child.geometry.clone();
+        child.geometry = geo;
+        child.updateMatrixWorld(true);
+        const matrix = child.matrixWorld;
+
+        const posAttr = geo.getAttribute('position');
+        if (!posAttr) {
+          return;
+        }
+
+        const index = geo.getIndex();
+        if (index) {
+          const kept: number[] = [];
+          for (let i = 0; i < index.count; i += 3) {
+            const ia = index.getX(i);
+            const ib = index.getX(i + 1);
+            const ic = index.getX(i + 2);
+
+            v.fromBufferAttribute(posAttr, ia).applyMatrix4(matrix);
+            const za = v.z;
+            v.fromBufferAttribute(posAttr, ib).applyMatrix4(matrix);
+            const zb = v.z;
+            v.fromBufferAttribute(posAttr, ic).applyMatrix4(matrix);
+            const zc = v.z;
+
+            if (za <= cutZ && zb <= cutZ && zc <= cutZ) {
+              kept.push(ia, ib, ic);
+            }
+          }
+          geo.setIndex(kept);
+        } else {
+          // Non-indexed geometry — rebuild position buffer keeping valid triangles
+          const vertexCount = posAttr.count;
+          const keptPositions: number[] = [];
+          for (let i = 0; i < vertexCount; i += 3) {
+            v.fromBufferAttribute(posAttr, i).applyMatrix4(matrix);
+            const za = v.z;
+            v.fromBufferAttribute(posAttr, i + 1).applyMatrix4(matrix);
+            const zb = v.z;
+            v.fromBufferAttribute(posAttr, i + 2).applyMatrix4(matrix);
+            const zc = v.z;
+
+            if (za <= cutZ && zb <= cutZ && zc <= cutZ) {
+              for (let vi = 0; vi < 3; vi++) {
+                keptPositions.push(
+                  posAttr.getX(i + vi),
+                  posAttr.getY(i + vi),
+                  posAttr.getZ(i + vi)
+                );
+              }
+            }
+          }
+          geo.setAttribute('position', new THREE.Float32BufferAttribute(keptPositions, 3));
+        }
+
+        geo.computeBoundingBox();
+        geo.computeBoundingSphere();
+      });
+
+      instance.traverse((object) => {
+        if (object instanceof THREE.Mesh) {
+          object.castShadow = true;
+          object.receiveShadow = true;
+        }
+      });
+
+      parent.add(instance);
+      fallback.visible = false;
+    })
+    .catch((error: unknown) => {
+      console.warn('Could not load single locker model', error);
+    });
+}
+
 function addLockers(
   root: THREE.Group,
   snapshots: Map<THREE.Object3D, TransformSnapshot>
@@ -2566,11 +2671,7 @@ function addLockers(
     const importedLocker = new THREE.Group();
     importedLocker.name = `${lockerCell.name}-imported`;
     lockerCell.add(importedLocker);
-    loadModelInto(`${MODEL_ROOT}/school-locker.glb`, importedLocker, fallback, {
-      rotation: new THREE.Euler(0, Math.PI / 2, 0),
-      stretchSize: new THREE.Vector3(0.42, 1.82, 0.5),
-      center: new THREE.Vector3(0, 0.94, 0)
-    });
+    loadSingleLockerInto(importedLocker, fallback);
 
     if (lockerIndex === MISSING_LOCKER_INDEX) {
       lockerMissingTargets.push(lockerCell);
@@ -2793,7 +2894,7 @@ function createClockFaceTexture(): THREE.CanvasTexture {
 function addSecurityCamera(
   root: THREE.Group,
   snapshots: Map<THREE.Object3D, TransformSnapshot>
-): Pick<HallwayHandles, 'securityCameraHead' | 'securityCameraLensMaterial'> {
+): Pick<HallwayHandles, 'securityCameraHead' | 'securityCameraLensMaterial' | 'securityCameraTrackTarget'> {
   const mountMaterial = createCleanMetalMaterial(0x4d5651, 0.35);
   const bodyMaterial = createCleanMetalMaterial(0xb8c1bb, 0.18);
   const securityCameraLensMaterial = new THREE.MeshStandardMaterial({
@@ -2825,12 +2926,14 @@ function addSecurityCamera(
   lens.position.z = -0.25;
   head.add(lens);
 
-  head.lookAt(new THREE.Vector3(0, 1.5, -9));
+  const defaultLookAt = new THREE.Vector3(0, 1.5, -9);
+  head.lookAt(defaultLookAt);
   snapshotTransform(head, snapshots);
 
   return {
     securityCameraHead: head,
-    securityCameraLensMaterial
+    securityCameraLensMaterial,
+    securityCameraTrackTarget: defaultLookAt.clone()
   };
 }
 

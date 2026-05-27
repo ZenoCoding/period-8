@@ -115,7 +115,17 @@ export function updateAnomaly(
   lightFailure: LightFailureEffectState = { progress: 0, sparkPulse: 0 }
 ): void {
   if (state.currentAnomalyId === 'camera-tracking') {
-    handles.securityCameraHead.lookAt(playerPosition.x, playerPosition.y - 0.18, playerPosition.z);
+    const target = handles.securityCameraTrackTarget;
+    // Convert player world position to hallway-local space for stable tracking
+    const localTarget = handles.root.worldToLocal(
+      new THREE.Vector3(playerPosition.x, playerPosition.y - 0.18, playerPosition.z)
+    );
+    // Smooth lag — ~1 second time constant for a creepy mechanical servo delay
+    target.lerp(localTarget, 0.033);
+    // Convert the lerped local target back to world space for lookAt
+    const worldTarget = handles.root.localToWorld(target.clone());
+    handles.securityCameraHead.lookAt(worldTarget);
+    handles.securityCameraHead.rotateY(Math.PI);
   }
 
   if (state.currentAnomalyId === 'clock-wrong') {
@@ -214,6 +224,7 @@ function resetAnomalies(handles: HallwayHandles): void {
   handles.clockSecondMaterial.emissiveIntensity = 0;
   handles.securityCameraLensMaterial.emissive.setHex(0x001a0e);
   handles.securityCameraLensMaterial.emissiveIntensity = 0.25;
+  handles.securityCameraTrackTarget.set(0, 1.5, -9);
   handles.doorLabelWrong.visible = false;
   handles.doorHandleCentered.visible = false;
   handles.ceilingStainFace.visible = false;

@@ -1,4 +1,12 @@
-import { WALKABLE_RECTS, type BoundsRect } from '../objects/hallway';
+import {
+  WALKABLE_RECTS,
+  type BoundsRect,
+  MAIN_HALF_WIDTH,
+  TRANSITION_BRANCH_X_MAX,
+  TRANSITION_CONNECTOR_CENTER_Z,
+  TRANSITION_ENTRY_Z_MIN,
+  TRANSITION_ENTRY_Z_MAX
+} from '../objects/hallway';
 import type { TransitionSide } from './transitionController';
 
 export interface TransitionSideTuning {
@@ -20,24 +28,24 @@ export interface SignCaptureResult {
   wall: 'xMin' | 'xMax' | 'zMin' | 'zMax';
 }
 
-const STORAGE_KEY = 'repetition.transitionTuning.v4';
+const STORAGE_KEY = 'repetition.transitionTuning.v5';
 const SIGN_WALL_OFFSET = 0.07;
 
 export const DEFAULT_TRANSITION_TUNING: TransitionTuning = {
   negative: {
-    commitX: -6.85,
+    commitX: -(TRANSITION_BRANCH_X_MAX - 1.15),
     commitZ: -10.15,
-    signX: -9.73,
+    signX: -(TRANSITION_BRANCH_X_MAX + MAIN_HALF_WIDTH - 0.07),
     signY: 1.7,
-    signZ: -17.25,
+    signZ: -(TRANSITION_CONNECTOR_CENTER_Z - 2.75),
     signRotationY: Math.PI / 2
   },
   positive: {
-    commitX: 6.85,
+    commitX: TRANSITION_BRANCH_X_MAX - 1.15,
     commitZ: 10.15,
-    signX: 9.73,
+    signX: TRANSITION_BRANCH_X_MAX + MAIN_HALF_WIDTH - 0.07,
     signY: 1.7,
-    signZ: 17.25,
+    signZ: TRANSITION_CONNECTOR_CENTER_Z - 2.75,
     signRotationY: -Math.PI / 2
   }
 };
@@ -90,10 +98,29 @@ export function isPastTunedCommitGate(
   x: number,
   z: number
 ): boolean {
-  const gate = tuning[sideKey(side)];
-  return side < 0
-    ? x <= gate.commitX && z <= gate.commitZ
-    : x >= gate.commitX && z >= gate.commitZ;
+  void tuning;
+
+  // If the player has already walked deep into the turn (Segment 2 or 3),
+  // they are physically way past the commit line.
+  if (side < 0) {
+    if (x <= -TRANSITION_ENTRY_Z_MIN && z <= -TRANSITION_ENTRY_Z_MAX) {
+      return true;
+    }
+  } else {
+    if (x >= TRANSITION_ENTRY_Z_MIN && z >= TRANSITION_ENTRY_Z_MAX) {
+      return true;
+    }
+  }
+
+  // A slanted threshold line (slope 1.2) going from the inside corner to the top wall.
+  // We mirror the formula for both sides: side * (z - 1.2 * x) <= thresholdLimit
+  // The threshold limit is derived from the inner corner (TRANSITION_ENTRY_Z_MIN, TRANSITION_ENTRY_Z_MAX).
+  // A margin of 0.28 is applied to shift the line closer to the main hallway (earlier trigger).
+  const innerZMin = TRANSITION_ENTRY_Z_MIN;
+  const innerZMax = TRANSITION_ENTRY_Z_MAX;
+  const margin = 0.28;
+  const thresholdLimit = innerZMax - 1.2 * innerZMin + margin;
+  return side * (z - 1.2 * x) <= thresholdLimit;
 }
 
 export function captureCommitGate(
@@ -144,10 +171,15 @@ export function getNearestTransitionSide(x: number, z: number): TransitionSide {
 export function formatTransitionTuning(tuning: TransitionTuning): string {
   const negative = tuning.negative;
   const positive = tuning.positive;
+  
+  const innerZMin = TRANSITION_ENTRY_Z_MIN;
+  const innerZMax = TRANSITION_ENTRY_Z_MAX;
+  const margin = 0.28;
+  const thresholdLimit = innerZMax - 1.2 * innerZMin + margin;
+
   return [
-    `Commit -: x<=${formatNumber(negative.commitX)} z<=${formatNumber(negative.commitZ)}`,
+    `Commit (slanted): side*(z - 1.2*x) <= ${formatNumber(thresholdLimit)} (margin: +${formatNumber(margin)})`,
     `Sign -: ${formatNumber(negative.signX)}, ${formatNumber(negative.signZ)} rot ${formatNumber(negative.signRotationY)}`,
-    `Commit +: x>=${formatNumber(positive.commitX)} z>=${formatNumber(positive.commitZ)}`,
     `Sign +: ${formatNumber(positive.signX)}, ${formatNumber(positive.signZ)} rot ${formatNumber(positive.signRotationY)}`
   ].join('\n');
 }

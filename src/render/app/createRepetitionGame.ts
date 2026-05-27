@@ -1237,12 +1237,17 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
   }
 
   function constrainCommittedView(): void {
+    // View locking disabled per user request to allow full turning around.
+    void COMMITTED_VIEW_LIMIT;
+    void clampAngleAround;
+    /*
     if (!activeTransition || activeTransition.phase === 'preCommit') {
       return;
     }
 
     const centerYaw = activeTransition.side < 0 ? 0 : Math.PI;
     yaw = clampAngleAround(yaw, centerYaw, COMMITTED_VIEW_LIMIT);
+    */
   }
 
   function worldToHallwayLocal(handles: HallwayHandles, worldPosition: THREE.Vector3): THREE.Vector3 {
