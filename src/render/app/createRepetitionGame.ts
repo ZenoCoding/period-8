@@ -1150,7 +1150,7 @@ export function createRepetitionGame(root: HTMLElement): RepetitionGame {
     camera.position.x += Math.sin(elapsedSeconds * 15.1) * shake;
     camera.position.y += Math.cos(elapsedSeconds * 12.7) * shake * 0.45;
 
-    if (Math.abs(camera.fov - fov) > 0.01) {
+    if (Math.abs(camera.fov - fov) > 0.1) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
     }

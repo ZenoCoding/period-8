@@ -103,6 +103,7 @@ class ImportedHallwayWalker implements HallwayWalker {
   private anomalyMode: WalkerAnomalyMode = 'normal';
   private isHeadTracking = false;
   private headTrackingTarget = new THREE.Vector3();
+  private readonly headTrackingScratch = new THREE.Vector3();
   private headTrackingElapsedSeconds = 0;
   private routeIndex = 0;
   private routeSegmentDistance = 1;
@@ -326,7 +327,8 @@ class ImportedHallwayWalker implements HallwayWalker {
 
     this.headCutCollar.visible = true;
 
-    const target = this.root.worldToLocal(this.headTrackingTarget.clone());
+    this.headTrackingScratch.copy(this.headTrackingTarget);
+    const target = this.root.worldToLocal(this.headTrackingScratch);
     const dx = target.x;
     const dz = target.z;
     const dy = target.y - WALKER_HEIGHT * 0.9;

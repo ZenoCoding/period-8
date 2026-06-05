@@ -24,6 +24,12 @@ const MAX_AMBIENCE = 5;
 const BASE_FLUORESCENT_INTENSITIES = [13.8, 12.8, 11.6, 12.2, 10.8, 10.4] as const;
 const BASE_FLUORESCENT_COLOR = 0xe2f2ff;
 
+const BLACKOUT_COLOR = new THREE.Color(0x050706);
+const cameraTrackingPlayerScratch = new THREE.Vector3();
+const cameraTrackingWorldScratch = new THREE.Vector3();
+const posterEyesScratch = new THREE.Vector3();
+
+
 export interface LightFailureEffectState {
   progress: number;
   sparkPulse: number;
@@ -116,14 +122,14 @@ export function updateAnomaly(
 ): void {
   if (state.currentAnomalyId === 'camera-tracking') {
     const target = handles.securityCameraTrackTarget;
-    // Convert player world position to hallway-local space for stable tracking
-    const localTarget = handles.root.worldToLocal(
-      new THREE.Vector3(playerPosition.x, playerPosition.y - 0.18, playerPosition.z)
-    );
+    // Convert player world position to hallway-local space using scratch vector
+    cameraTrackingPlayerScratch.set(playerPosition.x, playerPosition.y - 0.18, playerPosition.z);
+    const localTarget = handles.root.worldToLocal(cameraTrackingPlayerScratch);
     // Smooth lag — ~1 second time constant for a creepy mechanical servo delay
     target.lerp(localTarget, 0.033);
-    // Convert the lerped local target back to world space for lookAt
-    const worldTarget = handles.root.localToWorld(target.clone());
+    // Convert the lerped local target back to world space using scratch vector
+    cameraTrackingWorldScratch.copy(target);
+    const worldTarget = handles.root.localToWorld(cameraTrackingWorldScratch);
     handles.securityCameraHead.lookAt(worldTarget);
     handles.securityCameraHead.rotateY(Math.PI);
   }
@@ -173,34 +179,57 @@ export function updateAtmosphere(
     state.phase === 'escaped' ? 0 : THREE.MathUtils.clamp(ambienceLevel / MAX_AMBIENCE, 0, 1);
   const materialEscalation = Math.min(1, escalation * 0.82);
   const blackout = THREE.MathUtils.smoothstep(THREE.MathUtils.clamp(blackoutProgress, 0, 1), 0, 1);
-  const blackoutColor = new THREE.Color(0x050706);
 
-  if (scene.background instanceof THREE.Color) {
-    scene.background.lerpColors(SCHOOL_BACKGROUND, HORROR_BACKGROUND, escalation);
-    scene.background.lerp(blackoutColor, blackout * 0.74);
+  // 1. Scene-level background/fog updates (only if active hallway is running)
+  if (handles.ambientLight.visible) {
+    const sceneCache = scene as any;
+    if (
+      sceneCache.lastEscalation !== escalation ||
+      sceneCache.lastBlackout !== blackout
+    ) {
+      sceneCache.lastEscalation = escalation;
+      sceneCache.lastBlackout = blackout;
+
+      if (scene.background instanceof THREE.Color) {
+        scene.background.lerpColors(SCHOOL_BACKGROUND, HORROR_BACKGROUND, escalation);
+        scene.background.lerp(BLACKOUT_COLOR, blackout * 0.74);
+      }
+
+      const fog = scene.fog;
+      if (fog instanceof THREE.FogExp2) {
+        fog.color.lerpColors(SCHOOL_FOG, HORROR_FOG, escalation);
+        fog.color.lerp(BLACKOUT_COLOR, blackout * 0.82);
+        fog.density = 0.006 + escalation * 0.065 + blackout * 0.035;
+      }
+    }
   }
 
-  const fog = scene.fog;
-  if (fog instanceof THREE.FogExp2) {
-    fog.color.lerpColors(SCHOOL_FOG, HORROR_FOG, escalation);
-    fog.color.lerp(blackoutColor, blackout * 0.82);
-    fog.density = 0.006 + escalation * 0.065 + blackout * 0.035;
-  }
+  // 2. Hallway-level material updates (cached per hallway instance)
+  const handlesCache = handles as any;
+  if (
+    handlesCache.lastPhase !== state.phase ||
+    handlesCache.lastMaterialEscalation !== materialEscalation ||
+    handlesCache.lastBlackout !== blackout
+  ) {
+    handlesCache.lastPhase = state.phase;
+    handlesCache.lastMaterialEscalation = materialEscalation;
+    handlesCache.lastBlackout = blackout;
 
-  handles.environmentMaterials.wall.color.lerpColors(SCHOOL_WALL, HORROR_WALL, materialEscalation);
-  handles.environmentMaterials.floor.color.lerpColors(SCHOOL_FLOOR, HORROR_FLOOR, materialEscalation);
-  handles.environmentMaterials.ceiling.color.lerpColors(SCHOOL_CEILING, HORROR_CEILING, materialEscalation);
-  handles.environmentMaterials.trim.color.lerpColors(SCHOOL_TRIM, HORROR_TRIM, materialEscalation);
-  handles.environmentMaterials.wall.color.lerp(blackoutColor, blackout * 0.56);
-  handles.environmentMaterials.floor.color.lerp(blackoutColor, blackout * 0.62);
-  handles.environmentMaterials.ceiling.color.lerp(blackoutColor, blackout * 0.7);
-  handles.environmentMaterials.trim.color.lerp(blackoutColor, blackout * 0.5);
-  handles.ambientLight.color.lerpColors(SCHOOL_SKY, HORROR_SKY, escalation);
-  handles.ambientLight.groundColor.lerpColors(SCHOOL_GROUND, HORROR_GROUND, escalation);
-  handles.ambientLight.color.lerp(blackoutColor, blackout * 0.82);
-  handles.ambientLight.groundColor.lerp(blackoutColor, blackout * 0.88);
-  handles.ambientLight.intensity = (state.phase === 'escaped' ? 0.9 : 1.05 - escalation * 0.5) * (1 - blackout * 0.93);
-  handles.exitGlow.visible = state.phase === 'escaped';
+    handles.environmentMaterials.wall.color.lerpColors(SCHOOL_WALL, HORROR_WALL, materialEscalation);
+    handles.environmentMaterials.floor.color.lerpColors(SCHOOL_FLOOR, HORROR_FLOOR, materialEscalation);
+    handles.environmentMaterials.ceiling.color.lerpColors(SCHOOL_CEILING, HORROR_CEILING, materialEscalation);
+    handles.environmentMaterials.trim.color.lerpColors(SCHOOL_TRIM, HORROR_TRIM, materialEscalation);
+    handles.environmentMaterials.wall.color.lerp(BLACKOUT_COLOR, blackout * 0.56);
+    handles.environmentMaterials.floor.color.lerp(BLACKOUT_COLOR, blackout * 0.62);
+    handles.environmentMaterials.ceiling.color.lerp(BLACKOUT_COLOR, blackout * 0.7);
+    handles.environmentMaterials.trim.color.lerp(BLACKOUT_COLOR, blackout * 0.5);
+    handles.ambientLight.color.lerpColors(SCHOOL_SKY, HORROR_SKY, escalation);
+    handles.ambientLight.groundColor.lerpColors(SCHOOL_GROUND, HORROR_GROUND, escalation);
+    handles.ambientLight.color.lerp(BLACKOUT_COLOR, blackout * 0.82);
+    handles.ambientLight.groundColor.lerp(BLACKOUT_COLOR, blackout * 0.88);
+    handles.ambientLight.intensity = (state.phase === 'escaped' ? 0.9 : 1.05 - escalation * 0.5) * (1 - blackout * 0.93);
+    handles.exitGlow.visible = state.phase === 'escaped';
+  }
 }
 
 function resetAnomalies(handles: HallwayHandles): void {
@@ -286,7 +315,8 @@ function resetAnomalies(handles: HallwayHandles): void {
 
 function updatePosterEyes(handles: HallwayHandles, playerPosition: THREE.Vector3): void {
   for (const eye of handles.posterEyeTrackers) {
-    const localPlayer = eye.poster.worldToLocal(playerPosition.clone());
+    posterEyesScratch.copy(playerPosition);
+    const localPlayer = eye.poster.worldToLocal(posterEyesScratch);
     const shiftX = THREE.MathUtils.clamp(localPlayer.x * 0.004, -0.012, 0.012);
     const shiftY = THREE.MathUtils.clamp((localPlayer.y - eye.baseY) * 0.006, -0.008, 0.008);
     eye.mesh.position.x = eye.baseX + shiftX;

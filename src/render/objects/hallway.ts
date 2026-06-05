@@ -2532,7 +2532,16 @@ const LOCKER_SPACING_Z = 0.56;
 const LOCKER_ROW_CENTER_Z = 0.45;
 const MISSING_LOCKER_INDEX = 8;
 
+let cachedClippedLockerModel: THREE.Group | null = null;
+
 function loadSingleLockerInto(parent: THREE.Object3D, fallback: THREE.Object3D): void {
+  if (cachedClippedLockerModel) {
+    const instance = cachedClippedLockerModel.clone(true);
+    parent.add(instance);
+    fallback.visible = false;
+    return;
+  }
+
   const placement: ModelPlacementOptions = {
     rotation: new THREE.Euler(0, -Math.PI / 2, 0),
     fitSize: new THREE.Vector3(0.42, 1.82, 0.5),
@@ -2542,6 +2551,13 @@ function loadSingleLockerInto(parent: THREE.Object3D, fallback: THREE.Object3D):
 
   void getModel(`${MODEL_ROOT}/school-locker.glb`)
     .then((source) => {
+      if (cachedClippedLockerModel) {
+        const instance = cachedClippedLockerModel.clone(true);
+        parent.add(instance);
+        fallback.visible = false;
+        return;
+      }
+
       const instance = source.clone(true);
       instance.name = 'single-locker-instance';
       applyModelPlacement(instance, placement);
@@ -2626,6 +2642,7 @@ function loadSingleLockerInto(parent: THREE.Object3D, fallback: THREE.Object3D):
         }
       });
 
+      cachedClippedLockerModel = instance.clone(true);
       parent.add(instance);
       fallback.visible = false;
     })
