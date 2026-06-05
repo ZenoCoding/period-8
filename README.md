@@ -1,6 +1,6 @@
 # Period 8
 
-**Period 8** is a beautiful, high-performance, first-person looping horror-puzzle game built for the web. Inspired by *P.T.* and *The Exit 8*, the player must navigate a repeating school hallway and identify anomalies to break the loop and escape. Created as part of a multigenre project.
+**Period 8** is a beautiful, high-performance, first-person looping horror-puzzle game built for the web. Inspired by *The Exit 8*, the player must navigate a repeating school hallway and identify anomalies to break the loop and escape. Created as part of a multigenre project.
 
 **Live Demo:** [repetition-tycho.vercel.app](https://repetition-tycho.vercel.app)
 
