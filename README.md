@@ -2,6 +2,8 @@
 
 **Repetition** is a beautiful, high-performance, first-person looping horror-puzzle game built for the web. Inspired by *P.T.* and *The Exit 8*, the player must navigate a repeating school hallway and identify anomalies to break the loop and escape.
 
+**Live Demo:** [repetition-tycho.vercel.app](https://repetition-tycho.vercel.app)
+
 ---
 
 ## Gameplay & Rules
